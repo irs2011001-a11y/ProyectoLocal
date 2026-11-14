@@ -12,7 +12,8 @@
   - Formularios: `editProject/editMember/editGroup/editEntry`
   - Reportes: `buildReport` → `reportNode` (HTML), `reportCsv`, `reportText`, `shareReport`, `emailReport`
   - Vistas: `viewHome`, `viewProject`, `tabResumen|Miembros|Grupos|Conta|Reportes`
-- `styles.css` — tema claro/oscuro, `@media print` oculta `.noprint`.
+- `styles.css` — diseño estilo Apple: tarjeta central translúcida (`.shell`) sobre `icons/bg.svg`, dock inferior de iconos (`nav.dock`, etiqueta al hover), color azul `--brand`. Tema claro/oscuro, `@media print` oculta `.noprint`.
+- Navegación: `NAV`/`ICONS`/`dock()` en app.js; secciones visibles sin proyecto (muestran estado vacío). Subcategorías: `subList()` + opción "Crear nueva" (`custom` en `openForm`), sin almacenar lista aparte.
 - `sw.js` — caché offline. **Subir `VERSION` al cambiar cualquier archivo del shell.**
 - `manifest.webmanifest`, `icons/` — generados con `node tools/gen-icons.js`.
 

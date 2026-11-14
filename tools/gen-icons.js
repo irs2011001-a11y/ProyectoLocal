@@ -5,7 +5,7 @@ const path = require('path');
 const zlib = require('zlib');
 
 const OUT = path.join(__dirname, '..', 'icons');
-const C1 = [15, 118, 110], C2 = [13, 148, 136]; // teal degradado
+const C1 = [0, 86, 190], C2 = [10, 132, 255]; // azul degradado
 const WHITE = [255, 255, 255];
 
 const crcT = new Uint32Array(256).map((_, n) => { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; return c >>> 0; });
@@ -69,10 +69,10 @@ for (const [name, size, opt] of files) fs.writeFileSync(path.join(OUT, name), pn
 
 fs.writeFileSync(path.join(OUT, 'icon.svg'),
 `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
-<defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#0f766e"/><stop offset="1" stop-color="#0d9488"/></linearGradient></defs>
+<defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#0056be"/><stop offset="1" stop-color="#0a84ff"/></linearGradient></defs>
 <rect width="512" height="512" rx="113" fill="url(#g)"/>
 <path d="M256 123a128 128 0 0 0-128 128c0 44 26 74 62 118l66 41 66-41c36-44 62-74 62-118A128 128 0 0 0 256 123z" fill="#fff"/>
-<circle cx="256" cy="215" r="61" fill="#0f766e"/><circle cx="256" cy="215" r="31" fill="#fff"/>
+<circle cx="256" cy="215" r="61" fill="#0056be"/><circle cx="256" cy="215" r="31" fill="#fff"/>
 </svg>
 `);
 console.log('Iconos generados en', OUT);

@@ -4,7 +4,28 @@
 
 const KEY = 'proyectoLocal.v1';
 const SUBS = ['Comunitario', 'Religioso / Iglesia', 'Deportivo', 'Educativo', 'Negocio', 'Familiar', 'Evento', 'Otro'];
-const TABS = [['resumen', 'Resumen'], ['miembros', 'Miembros'], ['grupos', 'Grupos'], ['conta', 'Contabilidad'], ['reportes', 'Reportes']];
+const NAV = [['proyectos', 'Proyectos'], ['resumen', 'Resumen'], ['miembros', 'Miembros'], ['grupos', 'Grupos'], ['conta', 'Contabilidad'], ['reportes', 'Reportes']];
+const ICONS = {
+  proyectos: [['path', { d: 'M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z' }]],
+  resumen: [['path', { d: 'M5 20V11M12 20V4M19 20v-6' }]],
+  miembros: [['circle', { cx: 12, cy: 8, r: 4 }], ['path', { d: 'M4 21a8 8 0 0 1 16 0' }]],
+  grupos: [['circle', { cx: 9, cy: 8, r: 3.5 }], ['path', { d: 'M2.5 20a6.5 6.5 0 0 1 13 0' }], ['circle', { cx: 17, cy: 9, r: 2.5 }], ['path', { d: 'M17 14.5a5 5 0 0 1 4.5 5' }]],
+  conta: [['path', { d: 'M12 3v18' }], ['path', { d: 'M16.5 7.5C16.5 5.8 14.5 4.5 12 4.5S7.5 5.8 7.5 7.5 9.5 10.4 12 10.8s4.5 1.2 4.5 3.2-2 3.5-4.5 3.5-4.5-1.3-4.5-3' }]],
+  reportes: [['path', { d: 'M7 3h7l5 5v13H7z' }], ['path', { d: 'M14 3v5h5M10 13h6M10 17h6' }]]
+};
+function icon(name) {
+  const NS = 'http://www.w3.org/2000/svg';
+  const svg = document.createElementNS(NS, 'svg');
+  const base = { viewBox: '0 0 24 24', width: 22, height: 22, fill: 'none', stroke: 'currentColor', 'stroke-width': 1.7, 'stroke-linecap': 'round', 'stroke-linejoin': 'round', 'aria-hidden': 'true' };
+  for (const [k, v] of Object.entries(base)) svg.setAttribute(k, v);
+  for (const [tag, attrs] of ICONS[name]) {
+    const el = document.createElementNS(NS, tag);
+    for (const [k, v] of Object.entries(attrs)) el.setAttribute(k, v);
+    svg.append(el);
+  }
+  return svg;
+}
+const subList = () => [...new Set([...SUBS, ...db.projects.map(x => x.sub).filter(Boolean)])];
 
 /* ---------- utilidades ---------- */
 function h(tag, attrs, ...kids) {
@@ -70,7 +91,7 @@ function save() {
   try { localStorage.setItem(KEY, JSON.stringify(db)); }
   catch { toast('No se pudo guardar: almacenamiento lleno o bloqueado'); }
 }
-const ui = { pid: null, tab: 'resumen', ftype: '', q: '', rep: { kind: 'conta', from: '', to: '' } };
+const ui = { pid: null, tab: 'proyectos', lastTab: '', ftype: '', q: '', rep: { kind: 'conta', from: '', to: '' } };
 const proj = () => db.projects.find(p => p.id === ui.pid);
 const totals = (entries) => {
   const i = sum(entries.filter(e => e.type === 'ingreso').map(e => e.amount));
@@ -100,6 +121,12 @@ function openForm({ title, fields, values = {}, submit = 'Guardar', onSave, onDe
     const id = 'f_' + f.k;
     inp.id = id;
     form.append(h('label', { for: id }, f.label + (f.req ? ' *' : '')), inp);
+    if (f.custom) { // opción "crear nueva": muestra un campo de texto
+      const inp2 = h('input', { type: 'text', maxlength: 40, hidden: true, placeholder: 'Nombre de la nueva subcategoría', 'aria-label': 'Nueva subcategoría', autocomplete: 'off' });
+      inputs[f.k + '_new'] = inp2;
+      inp.addEventListener('change', () => { inp2.hidden = inp.value !== '__new__'; if (!inp2.hidden) inp2.focus(); });
+      form.append(inp2);
+    }
   }
   const close = () => { dlg.close(); dlg.remove(); };
   form.append(err, h('div', { class: 'actions' },
@@ -111,6 +138,10 @@ function openForm({ title, fields, values = {}, submit = 'Guardar', onSave, onDe
     const data = {};
     for (const f of fields) {
       let v = inputs[f.k].value.trim();
+      if (f.custom && v === '__new__') {
+        v = inputs[f.k + '_new'].value.trim().replace(/\s+/g, ' ');
+        if (!v) return void (err.textContent = 'Escriba el nombre de la nueva subcategoría');
+      }
       if (f.req && !v) return void (err.textContent = `Falta: ${f.label}`);
       if (f.type === 'money') {
         const c = toCents(v);
@@ -137,7 +168,7 @@ function editProject(p) {
     title: isNew ? 'Nuevo proyecto' : 'Editar proyecto',
     fields: [
       { k: 'name', label: 'Nombre del proyecto', type: 'text', req: true, max: 80 },
-      { k: 'sub', label: 'Subcategoría', type: 'select', options: SUBS.map(s => ({ v: s, l: s })) },
+      { k: 'sub', label: 'Subcategoría', type: 'select', custom: true, options: [...subList().map(s => ({ v: s, l: s })), { v: '__new__', l: '＋ Crear nueva subcategoría…' }] },
       { k: 'desc', label: 'Descripción', type: 'textarea', max: 2000 }
     ],
     values: p || {},
@@ -288,10 +319,9 @@ function emailReport(r) {
 let installEvt = null;
 const standalone = () => matchMedia('(display-mode: standalone)').matches || navigator.standalone;
 
-function topBar(title, back) {
+function topBar(title, sub) {
   return h('header', { class: 'top' },
-    back && h('button', { onclick: () => { ui.pid = null; render(); }, 'aria-label': 'Volver' }, '←'),
-    h('h1', null, title),
+    h('div', { class: 'grow' }, h('h1', null, title), sub && h('div', { class: 'sub' }, sub)),
     installEvt && !standalone() && h('button', { onclick: installApp }, 'Instalar'),
     h('button', { onclick: openBackup }, 'Respaldo'));
 }
@@ -321,9 +351,7 @@ function openBackup() {
   document.body.append(dlg); dlg.showModal();
 }
 
-function viewHome(app) {
-  app.append(topBar('Proyecto Local'));
-  const w = h('main', { class: 'wrap' });
+function tabProyectos(w) {
   if (!db.projects.length) w.append(h('div', { class: 'empty card' }, h('h2', null, 'Sin proyectos'), h('p', null, 'Cree su primer proyecto para comenzar.')));
   for (const p of db.projects) {
     const t = totals(p.entries);
@@ -332,15 +360,11 @@ function viewHome(app) {
       h('div', { class: 'row' }, p.sub && h('span', { class: 'tag' }, p.sub), h('span', { class: 'mute' }, `${p.members.length} miembros · ${p.groups.length} grupos`))));
   }
   w.append(h('button', { class: 'btn primary fab', onclick: () => editProject() }, '+ Nuevo proyecto'));
-  app.append(w);
 }
 
-function viewProject(app, p) {
-  app.append(topBar(p.name, true),
-    h('nav', { class: 'tabs', role: 'tablist' }, TABS.map(([k, l]) => h('button', { role: 'tab', 'aria-selected': String(ui.tab === k), onclick: () => { ui.tab = k; render(); } }, l))));
-  const w = h('main', { class: 'wrap' });
-  ({ resumen: tabResumen, miembros: tabMiembros, grupos: tabGrupos, conta: tabConta, reportes: tabReportes })[ui.tab](w, p);
-  app.append(w);
+function dock() {
+  return h('nav', { class: 'dock', 'aria-label': 'Secciones' }, NAV.map(([k, l]) =>
+    h('button', { 'aria-label': l, title: l, 'aria-current': ui.tab === k ? 'page' : null, onclick: () => { ui.tab = k; render(); } }, icon(k), h('span', { class: 'label' }, l))));
 }
 
 function tabResumen(w, p) {
@@ -443,11 +467,21 @@ function tabReportes(w, p) {
 
 function render() {
   const app = document.getElementById('app');
+  const old = app.querySelector('.scroll');
+  const st = old ? old.scrollTop : 0;
   app.replaceChildren();
+  if (!proj() && db.projects.length) ui.pid = db.projects[0].id;
   const p = proj();
-  if (ui.pid && !p) ui.pid = null;
-  (p ? viewProject.bind(null, app, p) : viewHome.bind(null, app))();
-  document.title = p ? `${p.name} · Proyecto Local` : 'Proyecto Local';
+  const w = h('main', { class: 'scroll' });
+  if (ui.tab === 'proyectos') tabProyectos(w);
+  else if (!p) w.append(h('div', { class: 'empty card' }, h('h2', null, 'Aún no hay proyecto'), h('p', null, 'Cree un proyecto para usar esta sección.'),
+    h('button', { class: 'btn primary', onclick: () => editProject() }, '+ Nuevo proyecto')));
+  else ({ resumen: tabResumen, miembros: tabMiembros, grupos: tabGrupos, conta: tabConta, reportes: tabReportes })[ui.tab](w, p);
+  const label = NAV.find(n => n[0] === ui.tab)[1];
+  app.append(h('div', { class: 'shell' }, topBar(ui.tab === 'proyectos' ? 'Proyecto Local' : label, ui.tab === 'proyectos' ? '' : (p ? p.name : '')), w, dock()));
+  if (ui.lastTab === ui.tab) w.scrollTop = st;
+  ui.lastTab = ui.tab;
+  document.title = p && ui.tab !== 'proyectos' ? `${p.name} · Proyecto Local` : 'Proyecto Local';
 }
 
 window.addEventListener('beforeinstallprompt', e => { e.preventDefault(); installEvt = e; render(); });
