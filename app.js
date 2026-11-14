@@ -1,0 +1,456 @@
+'use strict';
+/* Proyecto Local — PWA sin dependencias. Datos en localStorage (montos en centavos enteros).
+   Seguridad: sin innerHTML (todo vía h()), CSP estricta en index.html, validación en formularios e importación. */
+
+const KEY = 'proyectoLocal.v1';
+const SUBS = ['Comunitario', 'Religioso / Iglesia', 'Deportivo', 'Educativo', 'Negocio', 'Familiar', 'Evento', 'Otro'];
+const TABS = [['resumen', 'Resumen'], ['miembros', 'Miembros'], ['grupos', 'Grupos'], ['conta', 'Contabilidad'], ['reportes', 'Reportes']];
+
+/* ---------- utilidades ---------- */
+function h(tag, attrs, ...kids) {
+  const e = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (v == null || v === false) continue;
+    if (k === 'class') e.className = v;
+    else if (k.startsWith('on')) e.addEventListener(k.slice(2), v);
+    else e.setAttribute(k, v === true ? '' : v);
+  }
+  for (const c of kids.flat(Infinity)) {
+    if (c == null || c === false) continue;
+    e.append(c.nodeType ? c : document.createTextNode(String(c)));
+  }
+  return e;
+}
+const uid = () => (crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2, 10));
+const today = () => new Date().toLocaleDateString('en-CA');
+const isDate = s => /^\d{4}-\d{2}-\d{2}$/.test(s) && !isNaN(Date.parse(s));
+const fmtDate = s => (isDate(s) ? s.split('-').reverse().join('/') : '');
+const usd = c => (c / 100).toLocaleString('en-US', { style: 'currency', currency: 'USD' });
+const plain = c => (c / 100).toFixed(2);
+function toCents(str) {
+  const s = String(str).replace(/[\s$,]/g, '');
+  const m = /^(\d{1,12})(?:\.(\d{1,2}))?$/.exec(s);
+  if (!m) return null;
+  return parseInt(m[1], 10) * 100 + parseInt(((m[2] || '') + '00').slice(0, 2), 10);
+}
+const sum = a => a.reduce((t, x) => t + x, 0);
+function toast(msg) {
+  const t = document.getElementById('toast');
+  t.textContent = msg; t.classList.add('show');
+  clearTimeout(toast.id); toast.id = setTimeout(() => t.classList.remove('show'), 2600);
+}
+
+/* ---------- datos ---------- */
+function sanitize(d) {
+  const s = (v, n) => (typeof v === 'string' ? v.slice(0, n) : '');
+  const id = v => (typeof v === 'string' && v ? v.slice(0, 64) : uid());
+  const cents = v => (Number.isSafeInteger(v) && v >= 0 && v < 1e14 ? v : 0);
+  const out = { v: 1, projects: [] };
+  for (const p of Array.isArray(d && d.projects) ? d.projects : []) {
+    const groups = (Array.isArray(p.groups) ? p.groups : []).map(g => ({ id: id(g.id), name: s(g.name, 80), desc: s(g.desc, 500) }));
+    const gids = new Set(groups.map(g => g.id));
+    const members = (Array.isArray(p.members) ? p.members : []).map(m => ({
+      id: id(m.id), name: s(m.name, 80), phone: s(m.phone, 20), notes: s(m.notes, 1000),
+      gid: gids.has(m.gid) ? m.gid : ''
+    }));
+    const mids = new Set(members.map(m => m.id));
+    const entries = (Array.isArray(p.entries) ? p.entries : []).map(e => ({
+      id: id(e.id), date: isDate(e.date) ? e.date : today(), type: e.type === 'gasto' ? 'gasto' : 'ingreso',
+      concept: s(e.concept, 120), amount: cents(e.amount), mid: mids.has(e.mid) ? e.mid : ''
+    }));
+    out.projects.push({ id: id(p.id), name: s(p.name, 80) || 'Sin nombre', sub: s(p.sub, 60), desc: s(p.desc, 2000), groups, members, entries });
+  }
+  return out;
+}
+function load() {
+  try { return sanitize(JSON.parse(localStorage.getItem(KEY))); } catch { return { v: 1, projects: [] }; }
+}
+let db = load();
+function save() {
+  try { localStorage.setItem(KEY, JSON.stringify(db)); }
+  catch { toast('No se pudo guardar: almacenamiento lleno o bloqueado'); }
+}
+const ui = { pid: null, tab: 'resumen', ftype: '', q: '', rep: { kind: 'conta', from: '', to: '' } };
+const proj = () => db.projects.find(p => p.id === ui.pid);
+const totals = (entries) => {
+  const i = sum(entries.filter(e => e.type === 'ingreso').map(e => e.amount));
+  const g = sum(entries.filter(e => e.type === 'gasto').map(e => e.amount));
+  return { i, g, b: i - g };
+};
+const memberTotal = (p, mid, from, to) => sum(inRange(p.entries, from, to).filter(e => e.mid === mid && e.type === 'ingreso').map(e => e.amount));
+const inRange = (list, from, to) => list.filter(e => (!from || e.date >= from) && (!to || e.date <= to));
+
+/* ---------- formularios (modal) ---------- */
+function openForm({ title, fields, values = {}, submit = 'Guardar', onSave, onDelete }) {
+  const dlg = h('dialog', { class: 'modal', 'aria-label': title });
+  const err = h('p', { class: 'err', role: 'alert' });
+  const inputs = {};
+  const form = h('form', { novalidate: true }, h('h2', null, title));
+  for (const f of fields) {
+    let inp;
+    if (f.type === 'textarea') inp = h('textarea', { rows: 3, maxlength: f.max || 1000 });
+    else if (f.type === 'select') inp = h('select', null, f.options.map(o => h('option', { value: o.v }, o.l)));
+    else inp = h('input', {
+      type: f.type === 'money' ? 'text' : f.type, inputmode: f.type === 'money' ? 'decimal' : null,
+      maxlength: f.max || 120, placeholder: f.ph || null, autocomplete: 'off'
+    });
+    const v = values[f.k];
+    inp.value = f.type === 'money' ? (v != null ? plain(v) : '') : (v ?? f.def ?? '');
+    inputs[f.k] = inp;
+    const id = 'f_' + f.k;
+    inp.id = id;
+    form.append(h('label', { for: id }, f.label + (f.req ? ' *' : '')), inp);
+  }
+  const close = () => { dlg.close(); dlg.remove(); };
+  form.append(err, h('div', { class: 'actions' },
+    onDelete && h('button', { type: 'button', class: 'btn danger', onclick: () => { if (confirm('¿Eliminar definitivamente? No se puede deshacer.')) { close(); onDelete(); } } }, 'Eliminar'),
+    h('button', { type: 'button', class: 'btn', onclick: close }, 'Cancelar'),
+    h('button', { type: 'submit', class: 'btn primary' }, submit)));
+  form.addEventListener('submit', ev => {
+    ev.preventDefault();
+    const data = {};
+    for (const f of fields) {
+      let v = inputs[f.k].value.trim();
+      if (f.req && !v) return void (err.textContent = `Falta: ${f.label}`);
+      if (f.type === 'money') {
+        const c = toCents(v);
+        if (c == null || (f.req && c <= 0)) return void (err.textContent = `${f.label}: monto inválido (ej. 25.50)`);
+        v = c;
+      }
+      if (f.type === 'tel' && v && !/^[0-9+()\-\s.]{5,20}$/.test(v)) return void (err.textContent = 'Teléfono inválido');
+      if (f.type === 'date' && !isDate(v)) return void (err.textContent = `${f.label}: fecha inválida`);
+      data[f.k] = v;
+    }
+    close(); onSave(data);
+  });
+  dlg.append(form);
+  dlg.addEventListener('close', () => dlg.remove());
+  document.body.append(dlg);
+  dlg.showModal();
+  const first = form.querySelector('input,textarea,select'); first && first.focus();
+}
+
+/* ---------- acciones ---------- */
+function editProject(p) {
+  const isNew = !p;
+  openForm({
+    title: isNew ? 'Nuevo proyecto' : 'Editar proyecto',
+    fields: [
+      { k: 'name', label: 'Nombre del proyecto', type: 'text', req: true, max: 80 },
+      { k: 'sub', label: 'Subcategoría', type: 'select', options: SUBS.map(s => ({ v: s, l: s })) },
+      { k: 'desc', label: 'Descripción', type: 'textarea', max: 2000 }
+    ],
+    values: p || {},
+    onSave: d => {
+      if (isNew) { const n = { id: uid(), groups: [], members: [], entries: [], ...d }; db.projects.push(n); ui.pid = n.id; ui.tab = 'resumen'; }
+      else Object.assign(p, d);
+      save(); render();
+    },
+    onDelete: isNew ? null : () => { db.projects = db.projects.filter(x => x !== p); ui.pid = null; save(); render(); toast('Proyecto eliminado'); }
+  });
+}
+function editMember(p, m) {
+  const isNew = !m;
+  openForm({
+    title: isNew ? 'Nuevo miembro' : 'Editar miembro',
+    fields: [
+      { k: 'name', label: 'Nombre', type: 'text', req: true, max: 80 },
+      { k: 'phone', label: 'Teléfono', type: 'tel', max: 20 },
+      { k: 'gid', label: 'Grupo asignado', type: 'select', options: [{ v: '', l: '— Sin grupo —' }, ...p.groups.map(g => ({ v: g.id, l: g.name }))] },
+      { k: 'notes', label: 'Notas', type: 'textarea' }
+    ],
+    values: m || {},
+    onSave: d => { if (isNew) p.members.push({ id: uid(), ...d }); else Object.assign(m, d); save(); render(); },
+    onDelete: isNew ? null : () => { p.members = p.members.filter(x => x !== m); p.entries.forEach(e => { if (e.mid === m.id) e.mid = ''; }); save(); render(); }
+  });
+}
+function editGroup(p, g) {
+  const isNew = !g;
+  openForm({
+    title: isNew ? 'Nuevo grupo' : 'Editar grupo',
+    fields: [
+      { k: 'name', label: 'Nombre del grupo', type: 'text', req: true, max: 80 },
+      { k: 'desc', label: 'Descripción', type: 'textarea', max: 500 }
+    ],
+    values: g || {},
+    onSave: d => { if (isNew) p.groups.push({ id: uid(), ...d }); else Object.assign(g, d); save(); render(); },
+    onDelete: isNew ? null : () => { p.groups = p.groups.filter(x => x !== g); p.members.forEach(m => { if (m.gid === g.id) m.gid = ''; }); save(); render(); }
+  });
+}
+function editEntry(p, e, type, mid) {
+  const isNew = !e;
+  type = e ? e.type : type;
+  const fields = [
+    { k: 'date', label: 'Fecha', type: 'date', req: true },
+    { k: 'concept', label: 'Concepto', type: 'text', req: true, max: 120 },
+    { k: 'amount', label: 'Monto (USD)', type: 'money', req: true, ph: '0.00' }
+  ];
+  if (type === 'ingreso') fields.push({ k: 'mid', label: 'Miembro (aportación)', type: 'select', options: [{ v: '', l: '— Ninguno —' }, ...p.members.map(m => ({ v: m.id, l: m.name }))] });
+  openForm({
+    title: (isNew ? 'Nuevo ' : 'Editar ') + type,
+    fields,
+    values: e || { date: today(), mid: mid || '', concept: mid ? 'Aportación' : '' },
+    onSave: d => {
+      d.type = type; if (type === 'gasto') d.mid = '';
+      if (isNew) p.entries.push({ id: uid(), ...d }); else Object.assign(e, d);
+      save(); render();
+    },
+    onDelete: isNew ? null : () => { p.entries = p.entries.filter(x => x !== e); save(); render(); }
+  });
+}
+
+/* ---------- reportes ---------- */
+function buildReport(p, kind, from, to) {
+  const period = from || to ? `Período: ${fmtDate(from) || 'inicio'} – ${fmtDate(to) || 'hoy'}` : 'Período: todo';
+  const ents = inRange(p.entries, from, to).slice().sort((a, b) => a.date.localeCompare(b.date));
+  const mname = id => (p.members.find(m => m.id === id) || {}).name || '';
+  const gname = id => (p.groups.find(g => g.id === id) || {}).name || '';
+  const t = totals(ents);
+  let r;
+  if (kind === 'miembros') {
+    r = {
+      title: 'Miembros y aportaciones', head: ['Nombre', 'Teléfono', 'Grupo', 'Aportes', 'Total'], num: [3, 4],
+      rows: p.members.map(m => [m.name, m.phone, gname(m.gid), String(ents.filter(e => e.mid === m.id && e.type === 'ingreso').length), memberTotal(p, m.id, from, to)]),
+      foot: ['Total aportado por miembros', '', '', '', sum(p.members.map(m => memberTotal(p, m.id, from, to)))]
+    };
+  } else if (kind === 'grupos') {
+    r = {
+      title: 'Grupos', head: ['Grupo', 'Descripción', 'Miembros', 'Total aportado'], num: [2, 3],
+      rows: p.groups.map(g => { const ms = p.members.filter(m => m.gid === g.id); return [g.name, g.desc, ms.map(m => m.name).join(', ') || '—', sum(ms.map(m => memberTotal(p, m.id, from, to)))]; }),
+      foot: null
+    };
+    r.num = [3];
+  } else {
+    r = {
+      title: 'Registros contables', head: ['Fecha', 'Tipo', 'Concepto', 'Miembro', 'Monto'], num: [4],
+      rows: ents.map(e => [fmtDate(e.date), e.type === 'ingreso' ? 'Ingreso' : 'Gasto', e.concept, mname(e.mid), e.type === 'gasto' ? -e.amount : e.amount]),
+      foot: ['Balance', '', '', '', t.b]
+    };
+  }
+  r.summary = [['Ingresos', t.i], ['Gastos', t.g], ['Balance', t.b]];
+  r.heading = `${p.name}${p.sub ? ' · ' + p.sub : ''}`;
+  r.period = period;
+  r.date = `Generado: ${fmtDate(today())}`;
+  return r;
+}
+const cell = (v) => (typeof v === 'number' ? usd(v) : v);
+function reportNode(r) {
+  const tr = (cells, tag = 'td') => h('tr', null, cells.map((c, i) => h(tag, { class: r.num.includes(i) ? 'num' : null }, cell(c))));
+  return h('div', null,
+    h('div', { class: 'print-head' }, h('h2', null, r.heading), h('div', null, r.title), h('div', { class: 'mute' }, r.period + ' · ' + r.date)),
+    h('h3', { class: 'noprint' }, r.title), h('p', { class: 'mute noprint' }, r.period),
+    h('div', { class: 'stats' }, r.summary.map(([l, v]) => h('div', { class: 'stat' }, h('span', { class: 'mute' }, l), h('b', { class: v < 0 ? 'out' : null }, usd(v))))),
+    h('div', { class: 'table-scroll' }, h('table', null,
+      h('thead', null, h('tr', null, r.head.map((c, i) => h('th', { class: r.num.includes(i) ? 'num' : null }, c)))),
+      h('tbody', null, r.rows.length ? r.rows.map(x => tr(x)) : h('tr', null, h('td', { colspan: r.head.length, class: 'mute' }, 'Sin datos en este período'))),
+      r.foot && h('tfoot', null, tr(r.foot)))));
+}
+function reportCsv(r) {
+  const esc = v => {
+    let s = typeof v === 'number' ? plain(v) : String(v);
+    if (typeof v !== 'number' && /^[=+\-@\t\r]/.test(s)) s = "'" + s; // evita inyección de fórmulas
+    return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+  };
+  const lines = [[r.heading], [r.title], [r.period], [], r.head, ...r.rows];
+  if (r.foot) lines.push(r.foot);
+  return '﻿' + lines.map(l => l.map(esc).join(',')).join('\r\n');
+}
+function reportText(r) {
+  const out = [`${r.heading}`, `${r.title} — ${r.period}`, r.summary.map(([l, v]) => `${l}: ${usd(v)}`).join(' | '), ''];
+  r.rows.forEach(x => out.push('• ' + x.map(cell).filter(c => c !== '').join(' · ')));
+  return out.join('\n');
+}
+function download(name, text, type) {
+  const url = URL.createObjectURL(new Blob([text], { type }));
+  const a = h('a', { href: url, download: name }); document.body.append(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 4000);
+}
+const slug = s => s.toLowerCase().normalize('NFD').replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40) || 'reporte';
+async function shareReport(r) {
+  const text = reportText(r), title = `${r.heading} — ${r.title}`;
+  const file = new File([reportCsv(r)], `${slug(r.heading)}-${slug(r.title)}.csv`, { type: 'text/csv' });
+  try {
+    if (navigator.share) {
+      const withFile = navigator.canShare && navigator.canShare({ files: [file] });
+      await navigator.share(withFile ? { title, text, files: [file] } : { title, text });
+      return;
+    }
+  } catch (e) { if (e && e.name === 'AbortError') return; }
+  try { await navigator.clipboard.writeText(text); toast('Reporte copiado. Péguelo en email o WhatsApp'); }
+  catch { toast('Use "Email" o "CSV" para compartir'); }
+}
+function emailReport(r) {
+  const body = reportText(r).slice(0, 1500);
+  location.href = `mailto:?subject=${encodeURIComponent(`${r.heading} — ${r.title}`)}&body=${encodeURIComponent(body)}`;
+}
+
+/* ---------- vistas ---------- */
+let installEvt = null;
+const standalone = () => matchMedia('(display-mode: standalone)').matches || navigator.standalone;
+
+function topBar(title, back) {
+  return h('header', { class: 'top' },
+    back && h('button', { onclick: () => { ui.pid = null; render(); }, 'aria-label': 'Volver' }, '←'),
+    h('h1', null, title),
+    installEvt && !standalone() && h('button', { onclick: installApp }, 'Instalar'),
+    h('button', { onclick: openBackup }, 'Respaldo'));
+}
+async function installApp() {
+  if (!installEvt) return;
+  installEvt.prompt(); await installEvt.userChoice.catch(() => {}); installEvt = null; render();
+}
+function openBackup() {
+  const dlg = h('dialog', { class: 'modal', 'aria-label': 'Respaldo' });
+  const file = h('input', { type: 'file', accept: 'application/json,.json' });
+  file.addEventListener('change', async () => {
+    const f = file.files[0]; if (!f) return;
+    try {
+      if (f.size > 10e6) throw new Error('size');
+      const data = sanitize(JSON.parse(await f.text()));
+      if (!confirm(`Reemplazar TODOS los datos actuales por ${data.projects.length} proyecto(s) del respaldo?`)) return;
+      db = data; ui.pid = null; save(); dlg.close(); dlg.remove(); render(); toast('Respaldo restaurado');
+    } catch { toast('Archivo de respaldo inválido'); }
+  });
+  dlg.append(h('h2', null, 'Respaldo y dispositivos'),
+    h('p', { class: 'mute' }, 'Los datos viven solo en este dispositivo. Para pasarlos al celular o PC: exporte aquí e importe en el otro dispositivo (envíe el archivo por email).'),
+    h('div', { class: 'actions' }, h('button', { class: 'btn primary', onclick: () => download(`proyecto-local-${today()}.json`, JSON.stringify(db, null, 1), 'application/json') }, 'Exportar respaldo')),
+    h('label', { for: 'imp' }, 'Importar respaldo (.json)'), Object.assign(file, { id: 'imp' }),
+    h('p', { class: 'mute' }, 'Instalar: en PC (Chrome/Edge) use el botón "Instalar" o el icono en la barra de direcciones; crea el acceso directo en el escritorio. En iPhone: Compartir → Añadir a pantalla de inicio. En Android: menú ⋮ → Instalar aplicación.'),
+    h('div', { class: 'actions' }, h('button', { class: 'btn', onclick: () => { dlg.close(); dlg.remove(); } }, 'Cerrar')));
+  dlg.addEventListener('close', () => dlg.remove());
+  document.body.append(dlg); dlg.showModal();
+}
+
+function viewHome(app) {
+  app.append(topBar('Proyecto Local'));
+  const w = h('main', { class: 'wrap' });
+  if (!db.projects.length) w.append(h('div', { class: 'empty card' }, h('h2', null, 'Sin proyectos'), h('p', null, 'Cree su primer proyecto para comenzar.')));
+  for (const p of db.projects) {
+    const t = totals(p.entries);
+    w.append(h('div', { class: 'card', role: 'button', tabindex: '0', onclick: () => { ui.pid = p.id; ui.tab = 'resumen'; render(); }, onkeydown: e => { if (e.key === 'Enter') { ui.pid = p.id; ui.tab = 'resumen'; render(); } } },
+      h('div', { class: 'row between' }, h('h2', { class: 'grow' }, p.name), h('span', { class: 'money ' + (t.b < 0 ? 'out' : 'in') }, usd(t.b))),
+      h('div', { class: 'row' }, p.sub && h('span', { class: 'tag' }, p.sub), h('span', { class: 'mute' }, `${p.members.length} miembros · ${p.groups.length} grupos`))));
+  }
+  w.append(h('button', { class: 'btn primary fab', onclick: () => editProject() }, '+ Nuevo proyecto'));
+  app.append(w);
+}
+
+function viewProject(app, p) {
+  app.append(topBar(p.name, true),
+    h('nav', { class: 'tabs', role: 'tablist' }, TABS.map(([k, l]) => h('button', { role: 'tab', 'aria-selected': String(ui.tab === k), onclick: () => { ui.tab = k; render(); } }, l))));
+  const w = h('main', { class: 'wrap' });
+  ({ resumen: tabResumen, miembros: tabMiembros, grupos: tabGrupos, conta: tabConta, reportes: tabReportes })[ui.tab](w, p);
+  app.append(w);
+}
+
+function tabResumen(w, p) {
+  const t = totals(p.entries);
+  w.append(h('div', { class: 'card' },
+    h('div', { class: 'row between' }, h('h2', null, p.name), h('button', { class: 'btn sm', onclick: () => editProject(p) }, 'Editar')),
+    p.sub && h('span', { class: 'tag' }, p.sub),
+    h('p', null, p.desc || h('span', { class: 'mute' }, 'Sin descripción')),
+    h('div', { class: 'stats' },
+      h('div', { class: 'stat' }, h('span', { class: 'mute' }, 'Ingresos'), h('b', { class: 'in' }, usd(t.i))),
+      h('div', { class: 'stat' }, h('span', { class: 'mute' }, 'Gastos'), h('b', { class: 'out' }, usd(t.g))),
+      h('div', { class: 'stat' }, h('span', { class: 'mute' }, 'Balance'), h('b', { class: t.b < 0 ? 'out' : 'in' }, usd(t.b)))),
+    h('p', { class: 'mute' }, `${p.members.length} miembros · ${p.groups.length} grupos · ${p.entries.length} registros`)),
+    h('div', { class: 'row' },
+      h('button', { class: 'btn primary', onclick: () => editEntry(p, null, 'ingreso') }, '+ Ingreso'),
+      h('button', { class: 'btn', onclick: () => editEntry(p, null, 'gasto') }, '+ Gasto')));
+}
+
+function tabMiembros(w, p) {
+  if (!p.members.length) w.append(h('div', { class: 'empty card' }, 'Sin miembros. Agregue el primero.'));
+  const gname = id => (p.groups.find(g => g.id === id) || {}).name;
+  for (const m of p.members.slice().sort((a, b) => a.name.localeCompare(b.name, 'es'))) {
+    const hist = p.entries.filter(e => e.mid === m.id && e.type === 'ingreso').sort((a, b) => b.date.localeCompare(a.date));
+    const tel = m.phone.replace(/[^0-9+]/g, '');
+    w.append(h('details', { class: 'card' },
+      h('summary', null, h('div', { class: 'grow' }, h('b', null, m.name), h('div', { class: 'mute' }, [gname(m.gid), m.phone].filter(Boolean).join(' · ') || 'Sin grupo / teléfono')),
+        h('span', { class: 'money in' }, usd(sum(hist.map(e => e.amount))))),
+      m.phone && h('p', null, 'Tel: ', h('a', { href: 'tel:' + tel }, m.phone)),
+      m.notes && h('p', null, h('span', { class: 'mute' }, 'Notas: '), m.notes),
+      h('h3', null, 'Historial de aportaciones'),
+      hist.length ? hist.map(e => h('div', { class: 'item' }, h('span', { class: 'date' }, fmtDate(e.date)), h('span', { class: 'grow' }, e.concept), h('span', { class: 'money in' }, usd(e.amount)))) : h('p', { class: 'mute' }, 'Sin aportaciones'),
+      h('div', { class: 'actions' },
+        h('button', { class: 'btn sm primary', onclick: () => editEntry(p, null, 'ingreso', m.id) }, '+ Aportación'),
+        h('button', { class: 'btn sm', onclick: () => editMember(p, m) }, 'Editar'))));
+  }
+  w.append(h('button', { class: 'btn primary fab', onclick: () => editMember(p) }, '+ Miembro'));
+}
+
+function tabGrupos(w, p) {
+  if (!p.groups.length) w.append(h('div', { class: 'empty card' }, 'Sin grupos. Cree el primero.'));
+  for (const g of p.groups) {
+    const ms = p.members.filter(m => m.gid === g.id);
+    w.append(h('div', { class: 'card' },
+      h('div', { class: 'row between' }, h('h2', null, g.name), h('button', { class: 'btn sm', onclick: () => editGroup(p, g) }, 'Editar')),
+      g.desc && h('p', { class: 'mute' }, g.desc),
+      h('div', { class: 'row' }, ms.length ? ms.map(m => h('span', { class: 'tag' }, m.name)) : h('span', { class: 'mute' }, 'Sin miembros asignados (asigne desde la ficha del miembro)'))));
+  }
+  w.append(h('button', { class: 'btn primary fab', onclick: () => editGroup(p) }, '+ Grupo'));
+}
+
+function tabConta(w, p) {
+  const q = ui.q.toLowerCase();
+  const mname = id => (p.members.find(m => m.id === id) || {}).name;
+  const list = p.entries.filter(e => (!ui.ftype || e.type === ui.ftype) && (!q || (e.concept + ' ' + (mname(e.mid) || '')).toLowerCase().includes(q)))
+    .sort((a, b) => b.date.localeCompare(a.date));
+  const t = totals(list);
+  const search = h('input', { type: 'search', placeholder: 'Buscar concepto o miembro', 'aria-label': 'Buscar', value: ui.q });
+  search.value = ui.q;
+  search.addEventListener('change', () => { ui.q = search.value; render(); });
+  const sel = h('select', { 'aria-label': 'Filtrar tipo' }, [['', 'Todos'], ['ingreso', 'Ingresos'], ['gasto', 'Gastos']].map(([v, l]) => h('option', { value: v }, l)));
+  sel.value = ui.ftype;
+  sel.addEventListener('change', () => { ui.ftype = sel.value; render(); });
+  w.append(h('div', { class: 'card' }, h('div', { class: 'filters' }, sel, search),
+    h('div', { class: 'stats' },
+      h('div', { class: 'stat' }, h('span', { class: 'mute' }, 'Ingresos'), h('b', { class: 'in' }, usd(t.i))),
+      h('div', { class: 'stat' }, h('span', { class: 'mute' }, 'Gastos'), h('b', { class: 'out' }, usd(t.g))),
+      h('div', { class: 'stat' }, h('span', { class: 'mute' }, 'Balance'), h('b', { class: t.b < 0 ? 'out' : 'in' }, usd(t.b))))));
+  const card = h('div', { class: 'card' });
+  if (!list.length) card.append(h('div', { class: 'empty' }, 'Sin registros'));
+  for (const e of list) {
+    card.append(h('div', { class: 'item', role: 'button', tabindex: '0', onclick: () => editEntry(p, e), onkeydown: ev => { if (ev.key === 'Enter') editEntry(p, e); } },
+      h('span', { class: 'date' }, fmtDate(e.date)),
+      h('div', { class: 'grow' }, e.concept, mname(e.mid) && h('div', { class: 'mute' }, mname(e.mid))),
+      h('span', { class: 'money ' + (e.type === 'ingreso' ? 'in' : 'out') }, (e.type === 'ingreso' ? '+' : '−') + usd(e.amount))));
+  }
+  w.append(card,
+    h('div', { class: 'row' },
+      h('button', { class: 'btn primary', onclick: () => editEntry(p, null, 'ingreso') }, '+ Ingreso'),
+      h('button', { class: 'btn', onclick: () => editEntry(p, null, 'gasto') }, '+ Gasto')));
+}
+
+function tabReportes(w, p) {
+  const R = ui.rep;
+  const kind = h('select', { 'aria-label': 'Tipo de reporte' }, [['conta', 'Registros contables'], ['miembros', 'Miembros y aportaciones'], ['grupos', 'Grupos']].map(([v, l]) => h('option', { value: v }, l)));
+  kind.value = R.kind;
+  const from = h('input', { type: 'date', 'aria-label': 'Desde' }), to = h('input', { type: 'date', 'aria-label': 'Hasta' });
+  from.value = R.from; to.value = R.to;
+  const apply = () => { R.kind = kind.value; R.from = isDate(from.value) ? from.value : ''; R.to = isDate(to.value) ? to.value : ''; render(); };
+  [kind, from, to].forEach(x => x.addEventListener('change', apply));
+  const r = buildReport(p, R.kind, R.from, R.to);
+  w.append(
+    h('div', { class: 'card noprint' }, h('div', { class: 'filters' }, kind, h('div', null, h('label', null, 'Desde'), from), h('div', null, h('label', null, 'Hasta'), to))),
+    h('div', { class: 'card' }, reportNode(r)),
+    h('div', { class: 'row noprint' },
+      h('button', { class: 'btn primary', onclick: () => window.print() }, 'Imprimir / PDF'),
+      h('button', { class: 'btn', onclick: () => shareReport(r) }, 'Compartir'),
+      h('button', { class: 'btn', onclick: () => emailReport(r) }, 'Email'),
+      h('button', { class: 'btn', onclick: () => download(`${slug(p.name)}-${slug(r.title)}.csv`, reportCsv(r), 'text/csv') }, 'CSV')));
+}
+
+function render() {
+  const app = document.getElementById('app');
+  app.replaceChildren();
+  const p = proj();
+  if (ui.pid && !p) ui.pid = null;
+  (p ? viewProject.bind(null, app, p) : viewHome.bind(null, app))();
+  document.title = p ? `${p.name} · Proyecto Local` : 'Proyecto Local';
+}
+
+window.addEventListener('beforeinstallprompt', e => { e.preventDefault(); installEvt = e; render(); });
+window.addEventListener('appinstalled', () => { installEvt = null; toast('App instalada'); render(); });
+if ('serviceWorker' in navigator && location.protocol.startsWith('http')) navigator.serviceWorker.register('sw.js').catch(() => {});
+render();
