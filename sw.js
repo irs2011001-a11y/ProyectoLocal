@@ -1,6 +1,6 @@
 'use strict';
 // Subir VERSION al cambiar cualquier archivo del shell para invalidar caché.
-const VERSION = 'pl-v2';
+const VERSION = 'pl-v3';
 const SHELL = [
   './', './index.html', './styles.css', './app.js', './manifest.webmanifest',
   './icons/icon.svg', './icons/bg.svg', './icons/icon-192.png', './icons/icon-512.png',
