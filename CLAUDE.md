@@ -19,9 +19,10 @@
 
 ## Modelo de datos (v2, clave `proyectoLocal.v2`; v1 se migra solo y queda intacta)
 - identity `{id,name,desc,groups[],members[],projects[]}` (grupos y personas viven aquí; `member.active=false` = migrada/archivada)
-- project `{id,name,sub,desc,cat,assign:{gids,pids},tasks:[{id,name,state,budget,gids,pids}],entries[]}`; `p.members/p.groups/p.idn` son accesores no enumerables (`linkProject`) hacia su identidad
+- project `{id,name,sub,desc,cat,start,end,quota,assign:{gids,pids},tasks:[{id,name,state,budget,gids,pids}],entries[]}` (fechas YYYY-MM-DD opcionales; quota en centavos por persona asignada)
 - member `{id,name,phone,notes,gid,active}`; group `{id,name,desc}`
-- entry `{id,date,type:'ingreso'|'gasto',concept,amount(centavos),mid,notes,lines[{d,a}],att}`
+- entry `{id,date,type,kind:'dinero'|'especie'|'trabajo',concept,cid,amount,mid,tid,notes,lines[{d,a,tid}],att}`; solo `kind=dinero` entra a caja (`isCash`/`totals`)
+- identity.concepts `[{id,name,type}]`: lista guardada (desplegable + "Crear nuevo"), editable en Contabilidad → Conceptos; renombrar propaga a `entry.concept`
 - Navegación: `ui.iid` (identidad) → `ui.pid` (proyecto) → `ui.tab`. Inicio = lista de identidades. Identidad sin proyectos usa `identityView()` (solo Miembros/Grupos/Reportes).
 
 ## Reglas
@@ -35,7 +36,7 @@
 - Publicar: push a GitHub → Settings → Pages → rama main / root. URL https = instalable.
 
 ## Siguiente evolución
-- Diseño v2: ver `DISENO.md`. **Fases 1–2 hechas (identidades; tipo de actividad `cat`, `assign`, `tasks` en el Resumen)**; faltan fases 3–4.
+- Diseño v2: ver `DISENO.md`. **Fases 1–3 hechas (identidades; cat/assign/tasks; conceptos guardados, actividad=tarea, kind, cuota, fechas de proyecto, reportes general/actividad/concepto/cuotas)**; falta pulir (fase 4: gráficos, reportes extra)
 
 ## Estado
 - v1 completa: proyectos, miembros, grupos, contabilidad, reportes (imprimir/compartir/email/CSV), respaldo, PWA.

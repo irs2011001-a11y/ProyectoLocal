@@ -108,19 +108,37 @@ function sanitize(d) {
     }));
     const mids = new Set(members.map(m => m.id));
     const ca = o => ({ gids: arr(o && o.gids).filter(x => gids.has(x)), pids: arr(o && o.pids).filter(x => mids.has(x)) });
-    const projects = arr(i.projects).map(p => ({
-      id: id(p.id), name: s(p.name, 80) || 'Sin nombre', sub: s(p.sub, 60), desc: s(p.desc, 2000), cat: s(p.cat, 60),
-      assign: ca(p.assign),
-      tasks: arr(p.tasks).slice(0, 200).map(k => ({ id: id(k && k.id), name: s(k && k.name, 120) || 'Tarea', state: STATES.some(x => x[0] === (k && k.state)) ? k.state : 'pendiente', budget: cents(k && k.budget), ...ca(k) })),
-      entries: arr(p.entries).map(e => ({
-        id: id(e.id), date: isDate(e.date) ? e.date : today(), type: e.type === 'gasto' ? 'gasto' : 'ingreso',
-        concept: s(e.concept, 120), amount: cents(e.amount), mid: mids.has(e.mid) ? e.mid : '',
-        notes: s(e.notes, 1000),
-        lines: arr(e.lines).slice(0, 100).map(l => ({ d: s(l && l.d, 120), a: cents(l && l.a) })),
-        att: cleanAtt(e.att)
-      }))
-    }));
-    out.identities.push({ id: id(i.id), name: s(i.name, 80) || 'Sin nombre', desc: s(i.desc, 2000), groups, members, projects });
+    const projects = arr(i.projects).map(p => {
+      const tasks = arr(p.tasks).slice(0, 200).map(k => ({ id: id(k && k.id), name: s(k && k.name, 120) || 'Tarea', state: STATES.some(x => x[0] === (k && k.state)) ? k.state : 'pendiente', budget: cents(k && k.budget), ...ca(k) }));
+      const tids = new Set(tasks.map(k => k.id));
+      return {
+        id: id(p.id), name: s(p.name, 80) || 'Sin nombre', sub: s(p.sub, 60), desc: s(p.desc, 2000), cat: s(p.cat, 60),
+        start: isDate(p.start) ? p.start : '', end: isDate(p.end) ? p.end : '', quota: cents(p.quota),
+        assign: ca(p.assign), tasks,
+        entries: arr(p.entries).map(e => ({
+          id: id(e.id), date: isDate(e.date) ? e.date : today(), type: e.type === 'gasto' ? 'gasto' : 'ingreso',
+          kind: e.type !== 'gasto' && (e.kind === 'especie' || e.kind === 'trabajo') ? e.kind : 'dinero',
+          concept: s(e.concept, 120), cid: s(e.cid, 64), amount: cents(e.amount), mid: mids.has(e.mid) ? e.mid : '',
+          tid: tids.has(e.tid) ? e.tid : '', notes: s(e.notes, 1000),
+          lines: arr(e.lines).slice(0, 100).map(l => ({ d: s(l && l.d, 120), a: cents(l && l.a), tid: tids.has(l && l.tid) ? l.tid : '' })),
+          att: cleanAtt(e.att)
+        }))
+      };
+    });
+    // conceptos guardados: si la identidad no los tenía, se derivan de los registros existentes
+    const derive = !Array.isArray(i.concepts);
+    const concepts = derive ? [] : i.concepts.map(c => ({ id: id(c && c.id), name: s(c && c.name, 120), type: c && c.type === 'gasto' ? 'gasto' : 'ingreso' })).filter(c => c.name);
+    const cById = new Map(concepts.map(c => [c.id, c])), cByKey = new Map(concepts.map(c => [c.type + '|' + c.name.toLowerCase(), c]));
+    for (const p of projects) for (const e of p.entries) {
+      if (cById.has(e.cid)) continue;
+      e.cid = '';
+      if (!derive || !e.concept) continue;
+      const k = e.type + '|' + e.concept.toLowerCase();
+      let c = cByKey.get(k);
+      if (!c) { c = { id: uid(), name: e.concept, type: e.type }; concepts.push(c); cByKey.set(k, c); cById.set(c.id, c); }
+      e.cid = c.id;
+    }
+    out.identities.push({ id: id(i.id), name: s(i.name, 80) || 'Sin nombre', desc: s(i.desc, 2000), groups, members, concepts, projects });
   }
   for (const i of out.identities) i.projects.forEach(p => linkProject(p, i));
   return out;
@@ -149,18 +167,20 @@ const ui = { iid: null, pid: null, tab: 'proyectos', lastTab: '', ftype: '', q: 
 const ident = () => db.identities.find(i => i.id === ui.iid);
 const proj = () => { const i = ident(); return i ? i.projects.find(p => p.id === ui.pid) : undefined; };
 function identityView(i) { // vista sin proyecto: solo para gestionar personas/grupos de una identidad vacía
-  return linkProject({ virtual: true, name: i.name, sub: '', desc: '', entries: [] }, i);
+  return linkProject({ virtual: true, name: i.name, sub: '', desc: '', entries: [], tasks: [], assign: { gids: [], pids: [] }, quota: 0 }, i);
 }
+const isCash = e => e.kind !== 'especie' && e.kind !== 'trabajo'; // aportes en especie/trabajo no entran a caja
 const totals = (entries) => {
-  const i = sum(entries.filter(e => e.type === 'ingreso').map(e => e.amount));
-  const g = sum(entries.filter(e => e.type === 'gasto').map(e => e.amount));
+  const cash = entries.filter(isCash);
+  const i = sum(cash.filter(e => e.type === 'ingreso').map(e => e.amount));
+  const g = sum(cash.filter(e => e.type === 'gasto').map(e => e.amount));
   return { i, g, b: i - g };
 };
-const memberTotal = (p, mid, from, to) => sum(inRange(p.entries, from, to).filter(e => e.mid === mid && e.type === 'ingreso').map(e => e.amount));
+const memberTotal = (p, mid, from, to) => sum(inRange(p.entries, from, to).filter(e => e.mid === mid && e.type === 'ingreso' && isCash(e)).map(e => e.amount));
 const inRange = (list, from, to) => list.filter(e => (!from || e.date >= from) && (!to || e.date <= to));
 
 /* ---------- widgets de formulario: líneas de gasto y comprobante ---------- */
-function linesWidget(init, inputs) {
+function linesWidget(init, inputs, tasks) {
   const box = h('div', { class: 'lines' });
   const total = h('div', { class: 'mute' });
   const rows = [];
@@ -176,8 +196,9 @@ function linesWidget(init, inputs) {
       d: h('input', { type: 'text', maxlength: 120, placeholder: 'Detalle', 'aria-label': 'Detalle de línea', autocomplete: 'off' }),
       a: h('input', { type: 'text', inputmode: 'decimal', maxlength: 15, placeholder: '0.00', 'aria-label': 'Monto de línea', autocomplete: 'off' })
     };
-    if (l) { r.d.value = l.d; r.a.value = plain(l.a); }
-    r.node = h('div', { class: 'line' }, r.d, r.a,
+    r.t = tasks && tasks.length ? h('select', { 'aria-label': 'Actividad de la línea' }, [{ v: '', l: 'Sin tarea' }, ...tasks].map(o => h('option', { value: o.v }, o.l))) : null;
+    if (l) { r.d.value = l.d; r.a.value = plain(l.a); if (r.t) r.t.value = l.tid || ''; }
+    r.node = h('div', { class: 'line' }, r.d, r.a, r.t,
       h('button', { type: 'button', class: 'btn sm', 'aria-label': 'Quitar línea', onclick: () => { rows.splice(rows.indexOf(r), 1); r.node.remove(); sync(); } }, '✕'));
     r.d.addEventListener('input', sync); r.a.addEventListener('input', sync);
     rows.push(r); box.append(r.node);
@@ -192,7 +213,7 @@ function linesWidget(init, inputs) {
       if (!d && !a) continue;
       const c = toCents(a);
       if (!d || c == null || c <= 0) return { err: `Línea ${i + 1}: detalle y monto válido (ej. 12.50)` };
-      val.push({ d, a: c });
+      val.push({ d, a: c, tid: r.t ? r.t.value : '' });
     }
     return { val };
   };
@@ -252,7 +273,7 @@ function openAtt(a) {
 }
 
 /* ---------- formularios (modal) ---------- */
-function openForm({ title, fields, values = {}, submit = 'Guardar', onSave, onDelete }) {
+function openForm({ title, fields, values = {}, submit = 'Guardar', onSave, onDelete, validate, onClose }) {
   const dlg = h('dialog', { class: 'modal', 'aria-label': title });
   const err = h('p', { class: 'err', role: 'alert' });
   const inputs = {};
@@ -260,7 +281,7 @@ function openForm({ title, fields, values = {}, submit = 'Guardar', onSave, onDe
   for (const f of fields) {
     let inp;
     if (f.type === 'lines' || f.type === 'file' || f.type === 'checks') {
-      inputs[f.k] = f.type === 'lines' ? linesWidget(values[f.k], inputs) : f.type === 'file' ? fileWidget(values[f.k], err) : checksWidget(f, values[f.k]);
+      inputs[f.k] = f.type === 'lines' ? linesWidget(values[f.k], inputs, f.tasks) : f.type === 'file' ? fileWidget(values[f.k], err) : checksWidget(f, values[f.k]);
       form.append(h('label', null, f.label), inputs[f.k].node);
       continue;
     }
@@ -311,13 +332,16 @@ function openForm({ title, fields, values = {}, submit = 'Guardar', onSave, onDe
         v = c;
       }
       if (f.type === 'tel' && v && !/^[0-9+()\-\s.]{5,20}$/.test(v)) return void (err.textContent = 'Teléfono inválido');
-      if (f.type === 'date' && !isDate(v)) return void (err.textContent = `${f.label}: fecha inválida`);
+      if (f.type === 'date' && (v || f.req) && !isDate(v)) return void (err.textContent = `${f.label}: fecha inválida`);
       data[f.k] = v;
     }
+    const bad = validate && validate(data);
+    if (bad) return void (err.textContent = bad);
     close(); onSave(data);
   });
   dlg.append(form);
   dlg.addEventListener('close', () => dlg.remove());
+  if (onClose) dlg.addEventListener('close', onClose);
   document.body.append(dlg);
   dlg.showModal();
   const first = form.querySelector('input,textarea,select'); first && first.focus();
@@ -332,9 +356,13 @@ function editProject(p) {
       { k: 'name', label: 'Nombre del proyecto', type: 'text', req: true, max: 80 },
       { k: 'cat', label: 'Tipo de actividad', type: 'select', custom: true, options: [{ v: '', l: '— Sin definir —' }, ...catList().map(s => ({ v: s, l: s })), { v: '__new__', l: '＋ Crear nuevo tipo…' }] },
       { k: 'sub', label: 'Subcategoría', type: 'select', custom: true, options: [...subList().map(s => ({ v: s, l: s })), { v: '__new__', l: '＋ Crear nueva subcategoría…' }] },
+      { k: 'start', label: 'Fecha de inicio (opcional)', type: 'date' },
+      { k: 'end', label: 'Fecha de cierre (opcional)', type: 'date' },
+      { k: 'quota', label: 'Cuota por persona asignada (USD, opcional)', type: 'money', ph: '0.00' },
       { k: 'desc', label: 'Descripción', type: 'textarea', max: 2000 }
     ],
     values: p || {},
+    validate: d => (d.start && d.end && d.end < d.start ? 'La fecha de cierre es anterior a la de inicio' : ''),
     onSave: d => {
       if (isNew) { const I = ident(), n = linkProject({ id: uid(), entries: [], tasks: [], assign: { gids: [], pids: [] }, ...d }, I); I.projects.push(n); ui.pid = n.id; ui.tab = 'resumen'; }
       else Object.assign(p, d);
@@ -377,25 +405,74 @@ function editGroup(p, g) {
 function editEntry(p, e, type, mid) {
   const isNew = !e;
   type = e ? e.type : type;
+  const I = p.idn;
+  const names = I.concepts.filter(c => c.type === type).map(c => c.name).sort((a, b) => a.localeCompare(b, 'es'));
+  const cur = e ? e.concept : (mid ? 'Aportación' : '');
+  if (cur && !names.includes(cur)) names.push(cur);
+  const taskOpts = p.tasks.map(k => ({ v: k.id, l: k.name }));
   const fields = [
     { k: 'date', label: 'Fecha', type: 'date', req: true },
-    { k: 'concept', label: 'Concepto', type: 'text', req: true, max: 120 },
-    { k: 'amount', label: 'Monto (USD)', type: 'money', req: true, ph: '0.00' }
+    { k: 'concept', label: 'Concepto (elija de la lista o cree uno nuevo)', type: 'select', custom: true, req: true, options: [{ v: '', l: '— Elegir concepto —' }, ...names.map(n => ({ v: n, l: n })), { v: '__new__', l: '＋ Crear nuevo concepto…' }] },
+    { k: 'amount', label: type === 'ingreso' ? 'Monto / valor estimado (USD)' : 'Monto (USD)', type: 'money', ph: '0.00' }
   ];
-  if (type === 'ingreso') fields.push({ k: 'mid', label: 'Miembro (aportación)', type: 'select', options: [{ v: '', l: '— Ninguno —' }, ...p.members.map(m => ({ v: m.id, l: m.name }))] });
-  if (type === 'gasto') fields.push({ k: 'lines', label: 'Desglose de la factura (opcional: si agrega líneas, el monto es la suma)', type: 'lines' });
+  if (type === 'ingreso') fields.push(
+    { k: 'kind', label: 'Tipo de aporte', type: 'select', options: [{ v: 'dinero', l: 'Dinero' }, { v: 'especie', l: 'En especie (materiales)' }, { v: 'trabajo', l: 'Trabajo / mano de obra' }] },
+    { k: 'mid', label: 'Miembro (aportación)', type: 'select', options: [{ v: '', l: '— Ninguno —' }, ...p.members.map(m => ({ v: m.id, l: m.name }))] });
+  if (taskOpts.length) fields.push({ k: 'tid', label: 'Actividad (tarea del proyecto)', type: 'select', options: [{ v: '', l: '— Sin tarea (general) —' }, ...taskOpts] });
+  if (type === 'gasto') fields.push({ k: 'lines', label: 'Desglose de la factura (opcional: si agrega líneas, el monto es la suma)', type: 'lines', tasks: taskOpts });
   fields.push({ k: 'notes', label: 'Notas', type: 'textarea', max: 1000 });
   if (type === 'gasto') fields.push({ k: 'att', label: 'Comprobante (JPG, PNG, PDF u otro; máx. 1.5 MB)', type: 'file' });
   openForm({
     title: (isNew ? 'Nuevo ' : 'Editar ') + type,
     fields,
-    values: e || { date: today(), mid: mid || '', concept: mid ? 'Aportación' : '' },
+    values: e || { date: today(), mid: mid || '', concept: mid ? 'Aportación' : '', kind: 'dinero', tid: '' },
+    validate: d => ((d.lines && d.lines.length) || (d.kind && d.kind !== 'dinero') || d.amount > 0 ? '' : 'Monto: debe ser mayor que 0'),
     onSave: d => {
-      d.type = type; if (type === 'gasto') d.mid = '';
-      if (type !== 'gasto') { d.lines = []; d.att = null; }
+      d.type = type;
+      if (type === 'gasto') { d.mid = ''; d.kind = 'dinero'; } else { d.lines = []; d.att = null; }
+      if (d.lines.length) d.amount = sum(d.lines.map(l => l.a));
+      if (d.tid === undefined) d.tid = e ? e.tid : '';
+      let c = I.concepts.find(x => x.type === type && x.name.toLowerCase() === d.concept.toLowerCase());
+      if (!c) { c = { id: uid(), name: d.concept, type }; I.concepts.push(c); }
+      d.concept = c.name; d.cid = c.id;
       if (isNew) p.entries.push({ id: uid(), ...d }); else Object.assign(e, d);
-      save(); render();    },
+      save(); render();
+      if ((p.start && d.date < p.start) || (p.end && d.date > p.end)) toast('Aviso: la fecha está fuera del período del proyecto');
+    },
     onDelete: isNew ? null : () => { p.entries = p.entries.filter(x => x !== e); save(); render(); }
+  });
+}
+const conceptUses = (I, c) => sum(I.projects.map(q => q.entries.filter(e => e.cid === c.id).length));
+function manageConcepts(I) {
+  const dlg = h('dialog', { class: 'modal', 'aria-label': 'Conceptos' });
+  const close = () => { dlg.close(); dlg.remove(); };
+  const edit = (c, type) => { close(); editConcept(I, c, type); };
+  const sec = (type, label) => h('div', null, h('h3', null, label),
+    I.concepts.filter(c => c.type === type).sort((a, b) => a.name.localeCompare(b.name, 'es')).map(c =>
+      h('div', { class: 'item' }, h('span', { class: 'grow' }, c.name), h('span', { class: 'mute' }, conceptUses(I, c) + ' usos'), h('button', { class: 'btn sm', onclick: () => edit(c, type) }, 'Editar'))),
+    !I.concepts.some(c => c.type === type) && h('p', { class: 'mute' }, 'Sin conceptos'),
+    h('button', { class: 'btn sm', onclick: () => edit(null, type) }, '+ Concepto'));
+  dlg.append(h('h2', null, 'Conceptos guardados'),
+    h('p', { class: 'mute' }, 'Se eligen de una lista al registrar ingresos y gastos. Renombrar un concepto actualiza los registros que lo usan.'),
+    sec('ingreso', 'Ingresos'), sec('gasto', 'Gastos'),
+    h('div', { class: 'actions' }, h('button', { class: 'btn', onclick: close }, 'Cerrar')));
+  dlg.addEventListener('close', () => dlg.remove());
+  document.body.append(dlg); dlg.showModal();
+}
+function editConcept(I, c, type) {
+  const isNew = !c;
+  openForm({
+    title: (isNew ? 'Nuevo concepto de ' : 'Editar concepto de ') + type,
+    fields: [{ k: 'name', label: 'Nombre del concepto', type: 'text', req: true, max: 120 }],
+    values: c || {},
+    onClose: () => manageConcepts(I),
+    onSave: d => {
+      if (I.concepts.some(x => x !== c && x.type === type && x.name.toLowerCase() === d.name.toLowerCase())) return void toast('Ya existe ese concepto');
+      if (isNew) I.concepts.push({ id: uid(), name: d.name, type });
+      else { c.name = d.name; I.projects.forEach(q => q.entries.forEach(e => { if (e.cid === c.id) e.concept = d.name; })); }
+      save(); render();
+    },
+    onDelete: isNew ? null : () => { I.concepts = I.concepts.filter(x => x !== c); I.projects.forEach(q => q.entries.forEach(e => { if (e.cid === c.id) e.cid = ''; })); save(); render(); }
   });
 }
 
@@ -405,6 +482,7 @@ function buildReport(p, kind, from, to, act) {
   const ents = inRange(p.entries, from, to).slice().sort((a, b) => a.date.localeCompare(b.date));
   const mname = id => (p.idn.members.find(m => m.id === id) || {}).name || '';
   const gname = id => (p.groups.find(g => g.id === id) || {}).name || '';
+  const tname = id => (p.tasks.find(k => k.id === id) || {}).name || '';
   const t = totals(ents);
   let r;
   if (kind === 'miembros') {
@@ -420,33 +498,79 @@ function buildReport(p, kind, from, to, act) {
       foot: null
     };
     r.num = [3];
+  } else if (kind === 'general') {
+    const I = p.idn;
+    const rows = I.projects.map(q => {
+      const qe = inRange(q.entries, from, to), qt = totals(qe);
+      const per = q.start || q.end ? `${fmtDate(q.start) || '…'} – ${fmtDate(q.end) || '…'}` : '';
+      return [q.name, q.cat || q.sub || '', per, qt.i, qt.g, qt.b, sum(qe.filter(e => !isCash(e)).map(e => e.amount))];
+    });
+    const all = totals(I.projects.flatMap(q => inRange(q.entries, from, to)));
+    r = {
+      title: 'Resumen general', head: ['Proyecto', 'Actividad', 'Período', 'Ingresos', 'Gastos', 'Balance', 'Especie/trabajo (valor)'], num: [3, 4, 5, 6],
+      rows, foot: ['Total', '', '', all.i, all.g, all.b, sum(rows.map(x => x[6]))]
+    };
+    r.summary = [['Proyectos', String(I.projects.length)], ['Ingresos', all.i], ['Gastos', all.g], ['Balance', all.b]];
+  } else if (kind === 'actividad') {
+    const inc = {}, exp = {};
+    const add = (o, k, v) => { o[k || ''] = (o[k || ''] || 0) + v; };
+    for (const e of ents.filter(isCash)) {
+      if (e.type === 'ingreso') add(inc, e.tid, e.amount);
+      else if (e.lines.length) { e.lines.forEach(l => add(exp, l.tid, l.a)); add(exp, e.tid, Math.max(0, e.amount - sum(e.lines.map(l => l.a)))); }
+      else add(exp, e.tid, e.amount);
+    }
+    const rows = p.tasks.map(k => [k.name, STATE_L[k.state], k.budget || '', inc[k.id] || 0, exp[k.id] || 0, k.budget ? k.budget - (exp[k.id] || 0) : '']);
+    rows.push(['Sin tarea (general)', '', '', inc[''] || 0, exp[''] || 0, '']);
+    r = {
+      title: 'Por actividad / tarea', head: ['Tarea', 'Estado', 'Presupuesto', 'Ingresos', 'Gastos', 'Saldo del presupuesto'], num: [2, 3, 4, 5],
+      rows, foot: ['Total', '', sum(p.tasks.map(k => k.budget)) || '', sum(rows.map(x => x[3])), sum(rows.map(x => x[4])), '']
+    };
+  } else if (kind === 'concepto') {
+    const m = new Map();
+    for (const e of ents.filter(isCash)) {
+      const k = e.type + '|' + e.concept;
+      const x = m.get(k) || [e.concept, e.type === 'ingreso' ? 'Ingreso' : 'Gasto', 0, 0];
+      x[2]++; x[3] += e.amount; m.set(k, x);
+    }
+    const rows = [...m.values()].sort((a, b) => a[1].localeCompare(b[1]) || b[3] - a[3]).map(x => [x[0], x[1], String(x[2]), x[3]]);
+    r = { title: 'Por concepto', head: ['Concepto', 'Tipo', 'Registros', 'Total'], num: [2, 3], rows, foot: ['Balance (ingresos − gastos)', '', '', t.b] };
+  } else if (kind === 'cuotas') {
+    const q = p.quota || 0;
+    const owe = q ? p.members.filter(m => p.assign.pids.includes(m.id) || p.assign.gids.includes(m.gid)) : [];
+    const rows = owe.map(m => { const a = memberTotal(p, m.id, from, to), pend = Math.max(0, q - a); return [m.name, gname(m.gid), q, a, pend, pend ? 'Pendiente' : 'Al día']; });
+    r = {
+      title: 'Cuotas pendientes' + (q ? '' : ' (defina la cuota en el proyecto y asigne personas o grupos)'), head: ['Persona', 'Grupo', 'Cuota', 'Aportado', 'Pendiente', 'Estado'], num: [2, 3, 4],
+      rows, foot: ['Total', '', sum(rows.map(x => x[2])), sum(rows.map(x => x[3])), sum(rows.map(x => x[4])), '']
+    };
   } else if (kind === 'participacion') {
     const paid = ents.filter(e => e.type === 'ingreso' && e.mid && (!act || e.concept === act));
-    const tot = mid => sum(paid.filter(e => e.mid === mid).map(e => e.amount));
+    const tot = mid => sum(paid.filter(e => e.mid === mid && isCash(e)).map(e => e.amount));
+    const has = mid => paid.some(e => e.mid === mid);
     const rows = []; let yes = 0, no = 0;
     const groups = [...p.groups.map(g => ({ id: g.id, name: g.name })), { id: '', name: 'Sin grupo' }];
     for (const g of groups) {
       const ms = p.members.filter(m => m.gid === g.id).sort((a, b) => a.name.localeCompare(b.name, 'es'));
       if (!ms.length && !g.id) continue;
       let ok = 0;
-      for (const m of ms) { const v = tot(m.id); if (v > 0) ok++; rows.push([g.name, m.name, v > 0 ? 'Aportó' : 'No aportó', v]); }
+      for (const m of ms) { const v = tot(m.id), a = has(m.id); if (a) ok++; rows.push([g.name, m.name, a ? (v > 0 ? 'Aportó' : 'Aportó (especie/trabajo)') : 'No aportó', v]); }
       yes += ok; no += ms.length - ok;
       rows.push([g.name, 'Total del grupo', `${ok} de ${ms.length} aportaron`, sum(ms.map(m => tot(m.id)))]);
     }
     r = {
       title: 'Participación por grupos' + (act ? ' — ' + act : ''), head: ['Grupo', 'Miembro', 'Estado', 'Monto'], num: [3],
-      rows, foot: ['Total', '', `${yes} aportaron / ${no} no`, sum(paid.map(e => e.amount))]
+      rows, foot: ['Total', '', `${yes} aportaron / ${no} no`, sum(paid.filter(isCash).map(e => e.amount))]
     };
-    r.summary = [['Aportaron', String(yes)], ['No aportaron', String(no)], ['Total aportado', sum(paid.map(e => e.amount))]];
+    r.summary = [['Aportaron', String(yes)], ['No aportaron', String(no)], ['Total aportado', sum(paid.filter(isCash).map(e => e.amount))]];
   } else {
     r = {
-      title: 'Registros contables', head: ['Fecha', 'Tipo', 'Concepto', 'Miembro', 'Notas', 'Monto'], num: [5],
-      rows: ents.map(e => [fmtDate(e.date), e.type === 'ingreso' ? 'Ingreso' : 'Gasto', e.concept, mname(e.mid), e.notes || '', e.type === 'gasto' ? -e.amount : e.amount]),
-      foot: ['Balance', '', '', '', '', t.b]
+      title: 'Registros contables', head: ['Fecha', 'Tipo', 'Concepto', 'Actividad', 'Miembro', 'Notas', 'Monto'], num: [6],
+      rows: ents.map(e => [fmtDate(e.date), e.type === 'gasto' ? 'Gasto' : (isCash(e) ? 'Ingreso' : 'Ingreso (' + e.kind + ')'),
+        e.concept + (e.lines.length ? ` (${e.lines.length} líneas)` : ''), tname(e.tid), mname(e.mid), e.notes || '', e.type === 'gasto' ? -e.amount : e.amount]),
+      foot: ['Balance (solo dinero)', '', '', '', '', '', t.b]
     };
   }
   if (!r.summary) r.summary = [['Ingresos', t.i], ['Gastos', t.g], ['Balance', t.b]];
-  r.heading = `${p.name}${p.sub ? ' · ' + p.sub : ''}`;
+  r.heading = kind === 'general' ? p.idn.name : `${p.name}${p.sub ? ' · ' + p.sub : ''}`;
   r.period = period;
   r.date = `Generado: ${fmtDate(today())}`;
   return r;
@@ -549,7 +673,7 @@ function editIdentity(i) {
     ],
     values: i || {},
     onSave: d => {
-      if (isNew) { const n = { id: uid(), groups: [], members: [], projects: [], ...d }; db.identities.push(n); ui.iid = n.id; ui.pid = null; ui.tab = 'proyectos'; }
+      if (isNew) { const n = { id: uid(), groups: [], members: [], concepts: [], projects: [], ...d }; db.identities.push(n); ui.iid = n.id; ui.pid = null; ui.tab = 'proyectos'; }
       else Object.assign(i, d);
       save(); render();
     },
@@ -624,7 +748,7 @@ function editTask(p, k) {
     ],
     values: k || { state: 'pendiente', budget: 0 },
     onSave: d => { if (isNew) p.tasks.push({ id: uid(), ...d }); else Object.assign(k, d); save(); render(); },
-    onDelete: isNew ? null : () => { p.tasks = p.tasks.filter(x => x !== k); save(); render(); }
+    onDelete: isNew ? null : () => { p.tasks = p.tasks.filter(x => x !== k); p.entries.forEach(e => { if (e.tid === k.id) e.tid = ''; e.lines.forEach(l => { if (l.tid === k.id) l.tid = ''; }); }); save(); render(); }
   });
 }
 function resumenAsignados(p) {
@@ -650,6 +774,7 @@ function tabResumen(w, p) {
   w.append(h('div', { class: 'card' },
     h('div', { class: 'row between' }, h('h2', null, p.name), h('button', { class: 'btn sm', onclick: () => editProject(p) }, 'Editar')),
     h('div', { class: 'row' }, p.cat && h('span', { class: 'tag' }, p.cat), p.sub && h('span', { class: 'tag' }, p.sub)),
+    (p.start || p.end || p.quota > 0) && h('p', { class: 'mute' }, [(p.start || p.end) && `Período: ${fmtDate(p.start) || '…'} – ${fmtDate(p.end) || '…'}`, p.quota > 0 && `Cuota: ${usd(p.quota)} por persona`].filter(Boolean).join(' · ')),
     h('p', null, p.desc || h('span', { class: 'mute' }, 'Sin descripción')),
     h('div', { class: 'stats' },
       h('div', { class: 'stat' }, h('span', { class: 'mute' }, 'Ingresos'), h('b', { class: 'in' }, usd(t.i))),
@@ -696,6 +821,7 @@ function tabGrupos(w, p) {
 }
 
 function tabConta(w, p) {
+  const tn = e => (p.tasks.find(k => k.id === e.tid) || {}).name;
   const q = ui.q.toLowerCase();
   const mname = id => (p.idn.members.find(m => m.id === id) || {}).name;
   const list = p.entries.filter(e => (!ui.ftype || e.type === ui.ftype) && (!q || (e.concept + ' ' + (mname(e.mid) || '')).toLowerCase().includes(q)))
@@ -717,19 +843,21 @@ function tabConta(w, p) {
   for (const e of list) {
     card.append(h('div', { class: 'item', role: 'button', tabindex: '0', onclick: () => editEntry(p, e), onkeydown: ev => { if (ev.key === 'Enter') editEntry(p, e); } },
       h('span', { class: 'date' }, fmtDate(e.date)),
-      h('div', { class: 'grow' }, e.concept + (e.att ? ' 📎' : ''), mname(e.mid) && h('div', { class: 'mute' }, mname(e.mid)),
+      h('div', { class: 'grow' }, e.concept + (e.att ? ' 📎' : ''), [mname(e.mid), !isCash(e) && 'aporte en ' + e.kind, tn(e)].some(Boolean) && h('div', { class: 'mute' }, [mname(e.mid), !isCash(e) && 'aporte en ' + e.kind, tn(e)].filter(Boolean).join(' · ')),
         e.lines.length > 0 && h('div', { class: 'mute' }, `${e.lines.length} líneas`), e.notes && h('div', { class: 'mute' }, e.notes)),
       h('span', { class: 'money ' + (e.type === 'ingreso' ? 'in' : 'out') }, (e.type === 'ingreso' ? '+' : '−') + usd(e.amount))));
   }
   w.append(card,
     h('div', { class: 'row' },
       h('button', { class: 'btn primary', onclick: () => editEntry(p, null, 'ingreso') }, '+ Ingreso'),
-      h('button', { class: 'btn', onclick: () => editEntry(p, null, 'gasto') }, '+ Gasto')));
+      h('button', { class: 'btn', onclick: () => editEntry(p, null, 'gasto') }, '+ Gasto'),
+      h('button', { class: 'btn', onclick: () => manageConcepts(p.idn) }, 'Conceptos')));
 }
 
 function tabReportes(w, p) {
   const R = ui.rep;
-  const kind = h('select', { 'aria-label': 'Tipo de reporte' }, [['conta', 'Registros contables'], ['miembros', 'Miembros y aportaciones'], ['grupos', 'Grupos'], ['participacion', 'Participación por grupos']].map(([v, l]) => h('option', { value: v }, l)));
+  if (R.pid !== (p.id || '')) { R.pid = p.id || ''; R.from = p.start || ''; R.to = p.end || ''; } // período del proyecto por defecto
+  const kind = h('select', { 'aria-label': 'Tipo de reporte' }, [['conta', 'Registros contables (detallado)'], ['actividad', 'Por actividad / tarea'], ['concepto', 'Por concepto'], ['general', 'Resumen general de la identidad'], ['cuotas', 'Cuotas pendientes'], ['miembros', 'Miembros y aportaciones'], ['grupos', 'Grupos'], ['participacion', 'Participación por grupos']].map(([v, l]) => h('option', { value: v }, l)));
   kind.value = R.kind;
   const acts = [...new Set(p.entries.filter(e => e.type === 'ingreso' && e.mid).map(e => e.concept))].sort((a, b) => a.localeCompare(b, 'es'));
   if (!acts.includes(R.act)) R.act = '';
