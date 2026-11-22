@@ -2,7 +2,7 @@
 /* Proyecto Local — PWA sin dependencias. Datos en localStorage (montos en centavos enteros).
    Seguridad: sin innerHTML (todo vía h()), CSP estricta en index.html, validación en formularios e importación. */
 
-const KEY = 'proyectoLocal.v1';
+const KEY = 'proyectoLocal.v2', KEY_V1 = 'proyectoLocal.v1';
 const SUBS = ['Comunitario', 'Religioso / Iglesia', 'Deportivo', 'Educativo', 'Negocio', 'Familiar', 'Evento', 'Otro'];
 const NAV = [['proyectos', 'Proyectos'], ['resumen', 'Resumen'], ['miembros', 'Miembros'], ['grupos', 'Grupos'], ['conta', 'Contabilidad'], ['reportes', 'Reportes']];
 const ICONS = {
@@ -25,7 +25,7 @@ function icon(name) {
   }
   return svg;
 }
-const subList = () => [...new Set([...SUBS, ...db.projects.map(x => x.sub).filter(Boolean)])];
+const subList = () => [...new Set([...SUBS, ...db.identities.flatMap(i => i.projects).map(x => x.sub).filter(Boolean)])];
 
 /* ---------- utilidades ---------- */
 function h(tag, attrs, ...kids) {
@@ -68,40 +68,83 @@ function cleanAtt(a) {
   if (!a || typeof a.data !== 'string' || a.data.length > ATT_MAX * 1.4 || !ATT_RE.test(a.data)) return null;
   return { name: (typeof a.name === 'string' ? a.name : 'comprobante').slice(0, 120), data: a.data };
 }
+const arr = a => (Array.isArray(a) ? a : []);
+// v1 (proyectos con grupos/miembros propios) → v2: una identidad "Mi comunidad" que fusiona grupos y miembros por nombre
+function migrateV1(projects) {
+  const key = v => String(v || '').trim().toLowerCase();
+  const idn = { id: uid(), name: 'Mi comunidad', desc: '', groups: [], members: [], projects: [] };
+  const gByName = new Map(), mByName = new Map();
+  for (const p of projects) {
+    const gmap = new Map(), mmap = new Map();
+    for (const g of arr(p && p.groups)) {
+      const k = key(g.name); if (!k) continue;
+      if (!gByName.has(k)) { gByName.set(k, g.id); idn.groups.push(g); }
+      gmap.set(g.id, gByName.get(k));
+    }
+    for (const m of arr(p && p.members)) {
+      const k = key(m.name); if (!k) continue;
+      if (!mByName.has(k)) { mByName.set(k, m.id); idn.members.push({ ...m, gid: gmap.get(m.gid) || '' }); }
+      mmap.set(m.id, mByName.get(k));
+    }
+    idn.projects.push({ ...p, entries: arr(p && p.entries).map(e => ({ ...e, mid: mmap.get(e.mid) || '' })) });
+  }
+  return idn;
+}
 function sanitize(d) {
   const s = (v, n) => (typeof v === 'string' ? v.slice(0, n) : '');
   const id = v => (typeof v === 'string' && v ? v.slice(0, 64) : uid());
   const cents = v => (Number.isSafeInteger(v) && v >= 0 && v < 1e14 ? v : 0);
-  const out = { v: 1, projects: [] };
-  for (const p of Array.isArray(d && d.projects) ? d.projects : []) {
-    const groups = (Array.isArray(p.groups) ? p.groups : []).map(g => ({ id: id(g.id), name: s(g.name, 80), desc: s(g.desc, 500) }));
+  const src = d && Array.isArray(d.identities) ? d.identities : (d && arr(d.projects).length ? [migrateV1(d.projects)] : []);
+  const out = { v: 2, identities: [] };
+  for (const i of src) {
+    const groups = arr(i.groups).map(g => ({ id: id(g.id), name: s(g.name, 80), desc: s(g.desc, 500) }));
     const gids = new Set(groups.map(g => g.id));
-    const members = (Array.isArray(p.members) ? p.members : []).map(m => ({
+    const members = arr(i.members).map(m => ({
       id: id(m.id), name: s(m.name, 80), phone: s(m.phone, 20), notes: s(m.notes, 1000),
-      gid: gids.has(m.gid) ? m.gid : ''
+      gid: gids.has(m.gid) ? m.gid : '', active: m.active !== false
     }));
     const mids = new Set(members.map(m => m.id));
-    const entries = (Array.isArray(p.entries) ? p.entries : []).map(e => ({
-      id: id(e.id), date: isDate(e.date) ? e.date : today(), type: e.type === 'gasto' ? 'gasto' : 'ingreso',
-      concept: s(e.concept, 120), amount: cents(e.amount), mid: mids.has(e.mid) ? e.mid : '',
-      notes: s(e.notes, 1000),
-      lines: (Array.isArray(e.lines) ? e.lines : []).slice(0, 100).map(l => ({ d: s(l && l.d, 120), a: cents(l && l.a) })),
-      att: cleanAtt(e.att)
+    const projects = arr(i.projects).map(p => ({
+      id: id(p.id), name: s(p.name, 80) || 'Sin nombre', sub: s(p.sub, 60), desc: s(p.desc, 2000),
+      entries: arr(p.entries).map(e => ({
+        id: id(e.id), date: isDate(e.date) ? e.date : today(), type: e.type === 'gasto' ? 'gasto' : 'ingreso',
+        concept: s(e.concept, 120), amount: cents(e.amount), mid: mids.has(e.mid) ? e.mid : '',
+        notes: s(e.notes, 1000),
+        lines: arr(e.lines).slice(0, 100).map(l => ({ d: s(l && l.d, 120), a: cents(l && l.a) })),
+        att: cleanAtt(e.att)
+      }))
     }));
-    out.projects.push({ id: id(p.id), name: s(p.name, 80) || 'Sin nombre', sub: s(p.sub, 60), desc: s(p.desc, 2000), groups, members, entries });
+    out.identities.push({ id: id(i.id), name: s(i.name, 80) || 'Sin nombre', desc: s(i.desc, 2000), groups, members, projects });
   }
+  for (const i of out.identities) i.projects.forEach(p => linkProject(p, i));
   return out;
 }
+// Cada proyecto ve los grupos/miembros activos de su identidad (propiedades no enumerables: no se guardan en JSON)
+function linkProject(p, i) {
+  Object.defineProperties(p, {
+    idn: { value: i, configurable: true, writable: true },
+    members: { get: () => i.members.filter(m => m.active !== false), configurable: true },
+    groups: { get: () => i.groups, configurable: true }
+  });
+  return p;
+}
 function load() {
-  try { return sanitize(JSON.parse(localStorage.getItem(KEY))); } catch { return { v: 1, projects: [] }; }
+  try {
+    const raw = localStorage.getItem(KEY) || localStorage.getItem(KEY_V1); // v1 se conserva intacto como respaldo
+    return sanitize(JSON.parse(raw));
+  } catch { return sanitize(null); }
 }
 let db = load();
 function save() {
   try { localStorage.setItem(KEY, JSON.stringify(db)); }
   catch { toast('No se pudo guardar: almacenamiento lleno o bloqueado'); }
 }
-const ui = { pid: null, tab: 'proyectos', lastTab: '', ftype: '', q: '', rep: { kind: 'conta', from: '', to: '', act: '' } };
-const proj = () => db.projects.find(p => p.id === ui.pid);
+const ui = { iid: null, pid: null, tab: 'proyectos', lastTab: '', ftype: '', q: '', rep: { kind: 'conta', from: '', to: '', act: '' } };
+const ident = () => db.identities.find(i => i.id === ui.iid);
+const proj = () => { const i = ident(); return i ? i.projects.find(p => p.id === ui.pid) : undefined; };
+function identityView(i) { // vista sin proyecto: solo para gestionar personas/grupos de una identidad vacía
+  return linkProject({ virtual: true, name: i.name, sub: '', desc: '', entries: [] }, i);
+}
 const totals = (entries) => {
   const i = sum(entries.filter(e => e.type === 'ingreso').map(e => e.amount));
   const g = sum(entries.filter(e => e.type === 'gasto').map(e => e.amount));
@@ -277,11 +320,11 @@ function editProject(p) {
     ],
     values: p || {},
     onSave: d => {
-      if (isNew) { const n = { id: uid(), groups: [], members: [], entries: [], ...d }; db.projects.push(n); ui.pid = n.id; ui.tab = 'resumen'; }
+      if (isNew) { const I = ident(), n = linkProject({ id: uid(), entries: [], ...d }, I); I.projects.push(n); ui.pid = n.id; ui.tab = 'resumen'; }
       else Object.assign(p, d);
       save(); render();
     },
-    onDelete: isNew ? null : () => { db.projects = db.projects.filter(x => x !== p); ui.pid = null; save(); render(); toast('Proyecto eliminado'); }
+    onDelete: isNew ? null : () => { ident().projects = ident().projects.filter(x => x !== p); ui.pid = null; save(); render(); toast('Proyecto eliminado'); }
   });
 }
 function editMember(p, m) {
@@ -295,8 +338,8 @@ function editMember(p, m) {
       { k: 'notes', label: 'Notas', type: 'textarea' }
     ],
     values: m || {},
-    onSave: d => { if (isNew) p.members.push({ id: uid(), ...d }); else Object.assign(m, d); save(); render(); },
-    onDelete: isNew ? null : () => { p.members = p.members.filter(x => x !== m); p.entries.forEach(e => { if (e.mid === m.id) e.mid = ''; }); save(); render(); }
+    onSave: d => { if (isNew) p.idn.members.push({ id: uid(), active: true, ...d }); else Object.assign(m, d); save(); render(); },
+    onDelete: isNew ? null : () => { p.idn.members = p.idn.members.filter(x => x !== m); p.idn.projects.forEach(q => q.entries.forEach(e => { if (e.mid === m.id) e.mid = ''; })); save(); render(); }
   });
 }
 function editGroup(p, g) {
@@ -308,8 +351,8 @@ function editGroup(p, g) {
       { k: 'desc', label: 'Descripción', type: 'textarea', max: 500 }
     ],
     values: g || {},
-    onSave: d => { if (isNew) p.groups.push({ id: uid(), ...d }); else Object.assign(g, d); save(); render(); },
-    onDelete: isNew ? null : () => { p.groups = p.groups.filter(x => x !== g); p.members.forEach(m => { if (m.gid === g.id) m.gid = ''; }); save(); render(); }
+    onSave: d => { if (isNew) p.idn.groups.push({ id: uid(), ...d }); else Object.assign(g, d); save(); render(); },
+    onDelete: isNew ? null : () => { p.idn.groups = p.idn.groups.filter(x => x !== g); p.idn.members.forEach(m => { if (m.gid === g.id) m.gid = ''; }); save(); render(); }
   });
 }
 function editEntry(p, e, type, mid) {
@@ -341,7 +384,7 @@ function editEntry(p, e, type, mid) {
 function buildReport(p, kind, from, to, act) {
   const period = from || to ? `Período: ${fmtDate(from) || 'inicio'} – ${fmtDate(to) || 'hoy'}` : 'Período: todo';
   const ents = inRange(p.entries, from, to).slice().sort((a, b) => a.date.localeCompare(b.date));
-  const mname = id => (p.members.find(m => m.id === id) || {}).name || '';
+  const mname = id => (p.idn.members.find(m => m.id === id) || {}).name || '';
   const gname = id => (p.groups.find(g => g.id === id) || {}).name || '';
   const t = totals(ents);
   let r;
@@ -447,6 +490,7 @@ const standalone = () => matchMedia('(display-mode: standalone)').matches || nav
 function topBar(title, sub) {
   return h('header', { class: 'top' },
     h('div', { class: 'grow' }, h('h1', null, title), sub && h('div', { class: 'sub' }, sub)),
+    ui.iid && h('button', { onclick: () => { ui.iid = null; ui.pid = null; render(); } }, '← Identidades'),
     installEvt && !standalone() && h('button', { onclick: installApp }, 'Instalar'),
     h('button', { onclick: openBackup }, 'Respaldo'));
 }
@@ -462,8 +506,8 @@ function openBackup() {
     try {
       if (f.size > 10e6) throw new Error('size');
       const data = sanitize(JSON.parse(await f.text()));
-      if (!confirm(`Reemplazar TODOS los datos actuales por ${data.projects.length} proyecto(s) del respaldo?`)) return;
-      db = data; ui.pid = null; save(); dlg.close(); dlg.remove(); render(); toast('Respaldo restaurado');
+      if (!confirm(`Reemplazar TODOS los datos actuales por ${data.identities.length} identidad(es) y ${sum(data.identities.map(i => i.projects.length))} proyecto(s) del respaldo?`)) return;
+      db = data; ui.iid = null; ui.pid = null; save(); dlg.close(); dlg.remove(); render(); toast('Respaldo restaurado');
     } catch { toast('Archivo de respaldo inválido'); }
   });
   dlg.append(h('h2', null, 'Respaldo y dispositivos'),
@@ -476,9 +520,53 @@ function openBackup() {
   document.body.append(dlg); dlg.showModal();
 }
 
-function tabProyectos(w) {
-  if (!db.projects.length) w.append(h('div', { class: 'empty card' }, h('h2', null, 'Sin proyectos'), h('p', null, 'Cree su primer proyecto para comenzar.')));
-  for (const p of db.projects) {
+function editIdentity(i) {
+  const isNew = !i;
+  openForm({
+    title: isNew ? 'Nueva identidad' : 'Editar identidad',
+    fields: [
+      { k: 'name', label: 'Nombre de la comunidad / identidad', type: 'text', req: true, max: 80 },
+      { k: 'desc', label: 'Descripción', type: 'textarea', max: 2000 }
+    ],
+    values: i || {},
+    onSave: d => {
+      if (isNew) { const n = { id: uid(), groups: [], members: [], projects: [], ...d }; db.identities.push(n); ui.iid = n.id; ui.pid = null; ui.tab = 'proyectos'; }
+      else Object.assign(i, d);
+      save(); render();
+    },
+    onDelete: isNew || i.projects.length ? null : () => { db.identities = db.identities.filter(x => x !== i); ui.iid = null; save(); render(); toast('Identidad eliminada'); }
+  });
+}
+function migrateMember(p, m) {
+  const dests = db.identities.filter(i => i !== p.idn);
+  openForm({
+    title: 'Migrar a ' + m.name, submit: 'Migrar',
+    fields: [{ k: 'to', label: 'Identidad destino', type: 'select', req: true, def: dests[0] && dests[0].id, options: dests.map(i => ({ v: i.id, l: i.name })) }],
+    onSave: d => {
+      const to = db.identities.find(i => i.id === d.to); if (!to) return;
+      to.members.push({ id: uid(), name: m.name, phone: m.phone, notes: m.notes, gid: '', active: true });
+      m.active = false; // queda archivado aquí: su historial de aportaciones no viaja
+      save(); render(); toast(m.name + ' migrado a ' + to.name);
+    }
+  });
+}
+function tabIdentidades(w) {
+  if (!db.identities.length) w.append(h('div', { class: 'empty card' }, h('h2', null, 'Sin identidades'), h('p', null, 'Cree la primera (por ejemplo, el nombre de su comunidad).')));
+  for (const i of db.identities) {
+    const go = () => { ui.iid = i.id; ui.pid = null; ui.tab = 'proyectos'; render(); };
+    const t = totals(i.projects.flatMap(p => p.entries));
+    w.append(h('div', { class: 'card', role: 'button', tabindex: '0', onclick: go, onkeydown: e => { if (e.key === 'Enter') go(); } },
+      h('div', { class: 'row between' }, h('h2', { class: 'grow' }, i.name), h('span', { class: 'money ' + (t.b < 0 ? 'out' : 'in') }, usd(t.b))),
+      h('span', { class: 'mute' }, `${i.projects.length} proyectos · ${i.members.filter(m => m.active !== false).length} personas · ${i.groups.length} grupos`)));
+  }
+  w.append(h('button', { class: 'btn primary fab', onclick: () => editIdentity() }, '+ Nueva identidad'));
+}
+
+function tabProyectos(w, I) {
+  w.append(h('div', { class: 'card' }, h('div', { class: 'row between' }, h('p', { class: 'mute grow' }, I.desc || 'Sin descripción'),
+    h('button', { class: 'btn sm', onclick: () => editIdentity(I) }, 'Editar identidad'))));
+  if (!I.projects.length) w.append(h('div', { class: 'empty card' }, h('h2', null, 'Sin proyectos'), h('p', null, 'Cree el primer proyecto de esta identidad.')));
+  for (const p of I.projects) {
     const t = totals(p.entries);
     w.append(h('div', { class: 'card', role: 'button', tabindex: '0', onclick: () => { ui.pid = p.id; ui.tab = 'resumen'; render(); }, onkeydown: e => { if (e.key === 'Enter') { ui.pid = p.id; ui.tab = 'resumen'; render(); } } },
       h('div', { class: 'row between' }, h('h2', { class: 'grow' }, p.name), h('span', { class: 'money ' + (t.b < 0 ? 'out' : 'in') }, usd(t.b))),
@@ -522,7 +610,8 @@ function tabMiembros(w, p) {
       h('h3', null, 'Historial de aportaciones'),
       hist.length ? hist.map(e => h('div', { class: 'item' }, h('span', { class: 'date' }, fmtDate(e.date)), h('span', { class: 'grow' }, e.concept), h('span', { class: 'money in' }, usd(e.amount)))) : h('p', { class: 'mute' }, 'Sin aportaciones'),
       h('div', { class: 'actions' },
-        h('button', { class: 'btn sm primary', onclick: () => editEntry(p, null, 'ingreso', m.id) }, '+ Aportación'),
+        !p.virtual && h('button', { class: 'btn sm primary', onclick: () => editEntry(p, null, 'ingreso', m.id) }, '+ Aportación'),
+        db.identities.length > 1 && h('button', { class: 'btn sm', onclick: () => migrateMember(p, m) }, 'Migrar'),
         h('button', { class: 'btn sm', onclick: () => editMember(p, m) }, 'Editar'))));
   }
   w.append(h('button', { class: 'btn primary fab', onclick: () => editMember(p) }, '+ Miembro'));
@@ -542,7 +631,7 @@ function tabGrupos(w, p) {
 
 function tabConta(w, p) {
   const q = ui.q.toLowerCase();
-  const mname = id => (p.members.find(m => m.id === id) || {}).name;
+  const mname = id => (p.idn.members.find(m => m.id === id) || {}).name;
   const list = p.entries.filter(e => (!ui.ftype || e.type === ui.ftype) && (!q || (e.concept + ' ' + (mname(e.mid) || '')).toLowerCase().includes(q)))
     .sort((a, b) => b.date.localeCompare(a.date));
   const t = totals(list);
@@ -600,18 +689,25 @@ function render() {
   const old = app.querySelector('.scroll');
   const st = old ? old.scrollTop : 0;
   app.replaceChildren();
-  if (!proj() && db.projects.length) ui.pid = db.projects[0].id;
-  const p = proj();
+  if (!ident()) { ui.iid = null; ui.pid = null; }
+  const I = ident();
+  if (I && !proj() && I.projects.length) ui.pid = I.projects[0].id;
+  const p = I ? proj() : null;
   const w = h('main', { class: 'scroll' });
-  if (ui.tab === 'proyectos') tabProyectos(w);
-  else if (!p) w.append(h('div', { class: 'empty card' }, h('h2', null, 'Aún no hay proyecto'), h('p', null, 'Cree un proyecto para usar esta sección.'),
-    h('button', { class: 'btn primary', onclick: () => editProject() }, '+ Nuevo proyecto')));
-  else ({ resumen: tabResumen, miembros: tabMiembros, grupos: tabGrupos, conta: tabConta, reportes: tabReportes })[ui.tab](w, p);
-  const label = NAV.find(n => n[0] === ui.tab)[1];
-  app.append(h('div', { class: 'shell' }, topBar(ui.tab === 'proyectos' ? 'Proyecto Local' : label, ui.tab === 'proyectos' ? '' : (p ? p.name : '')), w, dock()));
+  if (!I) {
+    tabIdentidades(w);
+    app.append(h('div', { class: 'shell' }, topBar('Proyecto Local', 'Identidades'), w));
+  } else {
+    if (ui.tab === 'proyectos') tabProyectos(w, I);
+    else if (!p && !['miembros', 'grupos', 'reportes'].includes(ui.tab)) w.append(h('div', { class: 'empty card' }, h('h2', null, 'Aún no hay proyecto'), h('p', null, 'Cree un proyecto para usar esta sección.'),
+      h('button', { class: 'btn primary', onclick: () => editProject() }, '+ Nuevo proyecto')));
+    else ({ resumen: tabResumen, miembros: tabMiembros, grupos: tabGrupos, conta: tabConta, reportes: tabReportes })[ui.tab](w, p || identityView(I));
+    const label = NAV.find(n => n[0] === ui.tab)[1];
+    app.append(h('div', { class: 'shell' }, topBar(ui.tab === 'proyectos' ? I.name : label, ui.tab === 'proyectos' ? 'Proyectos' : (p ? I.name + ' · ' + p.name : I.name)), w, dock()));
+  }
   if (ui.lastTab === ui.tab) w.scrollTop = st;
   ui.lastTab = ui.tab;
-  document.title = p && ui.tab !== 'proyectos' ? `${p.name} · Proyecto Local` : 'Proyecto Local';
+  document.title = I ? `${p ? p.name + ' · ' : ''}${I.name} · Proyecto Local` : 'Proyecto Local';
 }
 
 window.addEventListener('beforeinstallprompt', e => { e.preventDefault(); installEvt = e; render(); });

@@ -17,11 +17,12 @@
 - `sw.js` — caché offline. **Subir `VERSION` al cambiar cualquier archivo del shell.**
 - `manifest.webmanifest`, `icons/` — generados con `node tools/gen-icons.js`.
 
-## Modelo de datos
-- project `{id,name,sub,desc,groups[],members[],entries[]}`
-- member `{id,name,phone,notes,gid}` (gid = grupo asignado)
-- group `{id,name,desc}`
-- entry `{id,date(YYYY-MM-DD),type:'ingreso'|'gasto',concept,amount(centavos),mid}`; historial de aportaciones del miembro = entries ingreso con `mid`.
+## Modelo de datos (v2, clave `proyectoLocal.v2`; v1 se migra solo y queda intacta)
+- identity `{id,name,desc,groups[],members[],projects[]}` (grupos y personas viven aquí; `member.active=false` = migrada/archivada)
+- project `{id,name,sub,desc,entries[]}`; `p.members/p.groups/p.idn` son accesores no enumerables (`linkProject`) hacia su identidad
+- member `{id,name,phone,notes,gid,active}`; group `{id,name,desc}`
+- entry `{id,date,type:'ingreso'|'gasto',concept,amount(centavos),mid,notes,lines[{d,a}],att}`
+- Navegación: `ui.iid` (identidad) → `ui.pid` (proyecto) → `ui.tab`. Inicio = lista de identidades. Identidad sin proyectos usa `identityView()` (solo Miembros/Grupos/Reportes).
 
 ## Reglas
 - Nunca `innerHTML`; construir DOM con `h()`. CSV escapa fórmulas (`=+-@`).
@@ -32,6 +33,9 @@
 ## Ejecutar / publicar
 - Local: `npx serve .` o `python -m http.server 8080` (SW requiere http/https, no file://).
 - Publicar: push a GitHub → Settings → Pages → rama main / root. URL https = instalable.
+
+## Siguiente evolución
+- Diseño v2: ver `DISENO.md`. **Fase 1 (identidades + migración v1→v2 + migrar persona) hecha**; faltan fases 2–4.
 
 ## Estado
 - v1 completa: proyectos, miembros, grupos, contabilidad, reportes (imprimir/compartir/email/CSV), respaldo, PWA.
