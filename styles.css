@@ -102,3 +102,6 @@ tfoot td{font-weight:700;border-top:2px solid var(--ink)}
   .print-head{display:block;margin-bottom:10px}
   .in,.out{color:#000}
 }
+
+.lines{display:grid;gap:6px;margin-bottom:6px}
+.line{display:grid;grid-template-columns:1fr 96px auto;gap:6px;align-items:center}

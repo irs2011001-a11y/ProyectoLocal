@@ -62,6 +62,12 @@ function toast(msg) {
 }
 
 /* ---------- datos ---------- */
+const ATT_MAX = 1500000; // bytes máx. por comprobante (localStorage ~5 MB en total)
+const ATT_RE = /^data:((?:image\/(?:jpeg|png|webp|gif))|application\/pdf|text\/plain|application\/msword|application\/vnd\.openxmlformats-officedocument\.(?:wordprocessingml\.document|spreadsheetml\.sheet)|application\/vnd\.ms-excel);base64,[A-Za-z0-9+/]+=*$/;
+function cleanAtt(a) {
+  if (!a || typeof a.data !== 'string' || a.data.length > ATT_MAX * 1.4 || !ATT_RE.test(a.data)) return null;
+  return { name: (typeof a.name === 'string' ? a.name : 'comprobante').slice(0, 120), data: a.data };
+}
 function sanitize(d) {
   const s = (v, n) => (typeof v === 'string' ? v.slice(0, n) : '');
   const id = v => (typeof v === 'string' && v ? v.slice(0, 64) : uid());
@@ -77,7 +83,10 @@ function sanitize(d) {
     const mids = new Set(members.map(m => m.id));
     const entries = (Array.isArray(p.entries) ? p.entries : []).map(e => ({
       id: id(e.id), date: isDate(e.date) ? e.date : today(), type: e.type === 'gasto' ? 'gasto' : 'ingreso',
-      concept: s(e.concept, 120), amount: cents(e.amount), mid: mids.has(e.mid) ? e.mid : ''
+      concept: s(e.concept, 120), amount: cents(e.amount), mid: mids.has(e.mid) ? e.mid : '',
+      notes: s(e.notes, 1000),
+      lines: (Array.isArray(e.lines) ? e.lines : []).slice(0, 100).map(l => ({ d: s(l && l.d, 120), a: cents(l && l.a) })),
+      att: cleanAtt(e.att)
     }));
     out.projects.push({ id: id(p.id), name: s(p.name, 80) || 'Sin nombre', sub: s(p.sub, 60), desc: s(p.desc, 2000), groups, members, entries });
   }
@@ -91,7 +100,7 @@ function save() {
   try { localStorage.setItem(KEY, JSON.stringify(db)); }
   catch { toast('No se pudo guardar: almacenamiento lleno o bloqueado'); }
 }
-const ui = { pid: null, tab: 'proyectos', lastTab: '', ftype: '', q: '', rep: { kind: 'conta', from: '', to: '' } };
+const ui = { pid: null, tab: 'proyectos', lastTab: '', ftype: '', q: '', rep: { kind: 'conta', from: '', to: '', act: '' } };
 const proj = () => db.projects.find(p => p.id === ui.pid);
 const totals = (entries) => {
   const i = sum(entries.filter(e => e.type === 'ingreso').map(e => e.amount));
@@ -101,6 +110,90 @@ const totals = (entries) => {
 const memberTotal = (p, mid, from, to) => sum(inRange(p.entries, from, to).filter(e => e.mid === mid && e.type === 'ingreso').map(e => e.amount));
 const inRange = (list, from, to) => list.filter(e => (!from || e.date >= from) && (!to || e.date <= to));
 
+/* ---------- widgets de formulario: líneas de gasto y comprobante ---------- */
+function linesWidget(init, inputs) {
+  const box = h('div', { class: 'lines' });
+  const total = h('div', { class: 'mute' });
+  const rows = [];
+  const sync = () => {
+    const used = rows.filter(r => r.d.value.trim() || r.a.value.trim());
+    const t = sum(used.map(r => toCents(r.a.value.trim()) || 0));
+    total.textContent = used.length ? 'Total de líneas: ' + usd(t) : '';
+    const m = inputs.amount;
+    if (m) { m.readOnly = used.length > 0; if (used.length) m.value = plain(t); }
+  };
+  const add = (l) => {
+    const r = {
+      d: h('input', { type: 'text', maxlength: 120, placeholder: 'Detalle', 'aria-label': 'Detalle de línea', autocomplete: 'off' }),
+      a: h('input', { type: 'text', inputmode: 'decimal', maxlength: 15, placeholder: '0.00', 'aria-label': 'Monto de línea', autocomplete: 'off' })
+    };
+    if (l) { r.d.value = l.d; r.a.value = plain(l.a); }
+    r.node = h('div', { class: 'line' }, r.d, r.a,
+      h('button', { type: 'button', class: 'btn sm', 'aria-label': 'Quitar línea', onclick: () => { rows.splice(rows.indexOf(r), 1); r.node.remove(); sync(); } }, '✕'));
+    r.d.addEventListener('input', sync); r.a.addEventListener('input', sync);
+    rows.push(r); box.append(r.node);
+  };
+  (init || []).forEach(add);
+  const node = h('div', null, box, total,
+    h('button', { type: 'button', class: 'btn sm', onclick: () => { add(); rows[rows.length - 1].d.focus(); } }, '+ Agregar línea'));
+  const get = () => {
+    const val = [];
+    for (const [i, r] of rows.entries()) {
+      const d = r.d.value.trim(), a = r.a.value.trim();
+      if (!d && !a) continue;
+      const c = toCents(a);
+      if (!d || c == null || c <= 0) return { err: `Línea ${i + 1}: detalle y monto válido (ej. 12.50)` };
+      val.push({ d, a: c });
+    }
+    return { val };
+  };
+  return { node, get, sync };
+}
+function fileWidget(init, err) {
+  let cur = init || null;
+  const info = h('div', { class: 'row' });
+  const inp = h('input', { type: 'file', accept: 'image/*,.pdf,.doc,.docx,.xls,.xlsx,.txt', 'aria-label': 'Comprobante' });
+  const draw = () => info.replaceChildren(...(cur ? [
+    h('span', { class: 'tag' }, 'Adjunto: ' + cur.name),
+    h('button', { type: 'button', class: 'btn sm', onclick: () => openAtt(cur) }, 'Ver'),
+    h('button', { type: 'button', class: 'btn sm danger', onclick: () => { cur = null; inp.value = ''; draw(); } }, 'Quitar')] : []));
+  inp.addEventListener('change', async () => {
+    err.textContent = '';
+    const f = inp.files[0]; if (!f) return;
+    try { cur = await readAtt(f); } catch (ex) { err.textContent = ex.message; inp.value = ''; }
+    draw();
+  });
+  draw();
+  return { node: h('div', null, inp, info), get: () => ({ val: cur }) };
+}
+async function readAtt(f) {
+  let blob = f, type = f.type;
+  if (/^image\/(jpeg|png|webp)$/.test(type)) { // reduce fotos para no llenar el almacenamiento
+    try {
+      const bmp = await createImageBitmap(f);
+      const k = Math.min(1, 1600 / Math.max(bmp.width, bmp.height));
+      const c = document.createElement('canvas'); c.width = Math.round(bmp.width * k); c.height = Math.round(bmp.height * k);
+      const g = c.getContext('2d'); g.fillStyle = '#fff'; g.fillRect(0, 0, c.width, c.height); g.drawImage(bmp, 0, 0, c.width, c.height);
+      blob = await new Promise(r => c.toBlob(r, 'image/jpeg', 0.75)); type = 'image/jpeg';
+    } catch { blob = f; }
+  }
+  if (!blob || blob.size > ATT_MAX) throw new Error('Archivo muy grande (máx. 1.5 MB)');
+  const data = await new Promise((res, rej) => { const fr = new FileReader(); fr.onload = () => res(fr.result); fr.onerror = rej; fr.readAsDataURL(new Blob([blob], { type })); });
+  const a = cleanAtt({ name: f.name, data });
+  if (!a) throw new Error('Formato no admitido (use JPG, PNG, PDF, DOC/XLS o TXT)');
+  return a;
+}
+function openAtt(a) {
+  const m = /^data:([^;]+);base64,(.*)$/.exec(a.data); if (!m) return;
+  const bin = atob(m[2]), u = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i);
+  const url = URL.createObjectURL(new Blob([u], { type: m[1] }));
+  const view = /^image\/|\/pdf$/.test(m[1]);
+  const el = h('a', { href: url, target: view ? '_blank' : null, rel: 'noopener', download: view ? null : a.name });
+  document.body.append(el); el.click(); el.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 60000);
+}
+
 /* ---------- formularios (modal) ---------- */
 function openForm({ title, fields, values = {}, submit = 'Guardar', onSave, onDelete }) {
   const dlg = h('dialog', { class: 'modal', 'aria-label': title });
@@ -109,6 +202,11 @@ function openForm({ title, fields, values = {}, submit = 'Guardar', onSave, onDe
   const form = h('form', { novalidate: true }, h('h2', null, title));
   for (const f of fields) {
     let inp;
+    if (f.type === 'lines' || f.type === 'file') {
+      inputs[f.k] = f.type === 'lines' ? linesWidget(values[f.k], inputs) : fileWidget(values[f.k], err);
+      form.append(h('label', null, f.label), inputs[f.k].node);
+      continue;
+    }
     if (f.type === 'textarea') inp = h('textarea', { rows: 3, maxlength: f.max || 1000 });
     else if (f.type === 'select') inp = h('select', null, f.options.map(o => h('option', { value: o.v }, o.l)));
     else inp = h('input', {
@@ -128,6 +226,7 @@ function openForm({ title, fields, values = {}, submit = 'Guardar', onSave, onDe
       form.append(inp2);
     }
   }
+  for (const f of fields) if (inputs[f.k].sync) inputs[f.k].sync();
   const close = () => { dlg.close(); dlg.remove(); };
   form.append(err, h('div', { class: 'actions' },
     onDelete && h('button', { type: 'button', class: 'btn danger', onclick: () => { if (confirm('¿Eliminar definitivamente? No se puede deshacer.')) { close(); onDelete(); } } }, 'Eliminar'),
@@ -137,6 +236,11 @@ function openForm({ title, fields, values = {}, submit = 'Guardar', onSave, onDe
     ev.preventDefault();
     const data = {};
     for (const f of fields) {
+      if (f.type === 'lines' || f.type === 'file') {
+        const r = inputs[f.k].get();
+        if (r.err) return void (err.textContent = r.err);
+        data[f.k] = r.val; continue;
+      }
       let v = inputs[f.k].value.trim();
       if (f.custom && v === '__new__') {
         v = inputs[f.k + '_new'].value.trim().replace(/\s+/g, ' ');
@@ -217,21 +321,24 @@ function editEntry(p, e, type, mid) {
     { k: 'amount', label: 'Monto (USD)', type: 'money', req: true, ph: '0.00' }
   ];
   if (type === 'ingreso') fields.push({ k: 'mid', label: 'Miembro (aportación)', type: 'select', options: [{ v: '', l: '— Ninguno —' }, ...p.members.map(m => ({ v: m.id, l: m.name }))] });
+  if (type === 'gasto') fields.push({ k: 'lines', label: 'Desglose de la factura (opcional: si agrega líneas, el monto es la suma)', type: 'lines' });
+  fields.push({ k: 'notes', label: 'Notas', type: 'textarea', max: 1000 });
+  if (type === 'gasto') fields.push({ k: 'att', label: 'Comprobante (JPG, PNG, PDF u otro; máx. 1.5 MB)', type: 'file' });
   openForm({
     title: (isNew ? 'Nuevo ' : 'Editar ') + type,
     fields,
     values: e || { date: today(), mid: mid || '', concept: mid ? 'Aportación' : '' },
     onSave: d => {
       d.type = type; if (type === 'gasto') d.mid = '';
+      if (type !== 'gasto') { d.lines = []; d.att = null; }
       if (isNew) p.entries.push({ id: uid(), ...d }); else Object.assign(e, d);
-      save(); render();
-    },
+      save(); render();    },
     onDelete: isNew ? null : () => { p.entries = p.entries.filter(x => x !== e); save(); render(); }
   });
 }
 
 /* ---------- reportes ---------- */
-function buildReport(p, kind, from, to) {
+function buildReport(p, kind, from, to, act) {
   const period = from || to ? `Período: ${fmtDate(from) || 'inicio'} – ${fmtDate(to) || 'hoy'}` : 'Período: todo';
   const ents = inRange(p.entries, from, to).slice().sort((a, b) => a.date.localeCompare(b.date));
   const mname = id => (p.members.find(m => m.id === id) || {}).name || '';
@@ -251,14 +358,32 @@ function buildReport(p, kind, from, to) {
       foot: null
     };
     r.num = [3];
+  } else if (kind === 'participacion') {
+    const paid = ents.filter(e => e.type === 'ingreso' && e.mid && (!act || e.concept === act));
+    const tot = mid => sum(paid.filter(e => e.mid === mid).map(e => e.amount));
+    const rows = []; let yes = 0, no = 0;
+    const groups = [...p.groups.map(g => ({ id: g.id, name: g.name })), { id: '', name: 'Sin grupo' }];
+    for (const g of groups) {
+      const ms = p.members.filter(m => m.gid === g.id).sort((a, b) => a.name.localeCompare(b.name, 'es'));
+      if (!ms.length && !g.id) continue;
+      let ok = 0;
+      for (const m of ms) { const v = tot(m.id); if (v > 0) ok++; rows.push([g.name, m.name, v > 0 ? 'Aportó' : 'No aportó', v]); }
+      yes += ok; no += ms.length - ok;
+      rows.push([g.name, 'Total del grupo', `${ok} de ${ms.length} aportaron`, sum(ms.map(m => tot(m.id)))]);
+    }
+    r = {
+      title: 'Participación por grupos' + (act ? ' — ' + act : ''), head: ['Grupo', 'Miembro', 'Estado', 'Monto'], num: [3],
+      rows, foot: ['Total', '', `${yes} aportaron / ${no} no`, sum(paid.map(e => e.amount))]
+    };
+    r.summary = [['Aportaron', String(yes)], ['No aportaron', String(no)], ['Total aportado', sum(paid.map(e => e.amount))]];
   } else {
     r = {
-      title: 'Registros contables', head: ['Fecha', 'Tipo', 'Concepto', 'Miembro', 'Monto'], num: [4],
-      rows: ents.map(e => [fmtDate(e.date), e.type === 'ingreso' ? 'Ingreso' : 'Gasto', e.concept, mname(e.mid), e.type === 'gasto' ? -e.amount : e.amount]),
-      foot: ['Balance', '', '', '', t.b]
+      title: 'Registros contables', head: ['Fecha', 'Tipo', 'Concepto', 'Miembro', 'Notas', 'Monto'], num: [5],
+      rows: ents.map(e => [fmtDate(e.date), e.type === 'ingreso' ? 'Ingreso' : 'Gasto', e.concept, mname(e.mid), e.notes || '', e.type === 'gasto' ? -e.amount : e.amount]),
+      foot: ['Balance', '', '', '', '', t.b]
     };
   }
-  r.summary = [['Ingresos', t.i], ['Gastos', t.g], ['Balance', t.b]];
+  if (!r.summary) r.summary = [['Ingresos', t.i], ['Gastos', t.g], ['Balance', t.b]];
   r.heading = `${p.name}${p.sub ? ' · ' + p.sub : ''}`;
   r.period = period;
   r.date = `Generado: ${fmtDate(today())}`;
@@ -270,7 +395,7 @@ function reportNode(r) {
   return h('div', null,
     h('div', { class: 'print-head' }, h('h2', null, r.heading), h('div', null, r.title), h('div', { class: 'mute' }, r.period + ' · ' + r.date)),
     h('h3', { class: 'noprint' }, r.title), h('p', { class: 'mute noprint' }, r.period),
-    h('div', { class: 'stats' }, r.summary.map(([l, v]) => h('div', { class: 'stat' }, h('span', { class: 'mute' }, l), h('b', { class: v < 0 ? 'out' : null }, usd(v))))),
+    h('div', { class: 'stats' }, r.summary.map(([l, v]) => h('div', { class: 'stat' }, h('span', { class: 'mute' }, l), h('b', { class: v < 0 ? 'out' : null }, cell(v))))),
     h('div', { class: 'table-scroll' }, h('table', null,
       h('thead', null, h('tr', null, r.head.map((c, i) => h('th', { class: r.num.includes(i) ? 'num' : null }, c)))),
       h('tbody', null, r.rows.length ? r.rows.map(x => tr(x)) : h('tr', null, h('td', { colspan: r.head.length, class: 'mute' }, 'Sin datos en este período'))),
@@ -287,7 +412,7 @@ function reportCsv(r) {
   return '﻿' + lines.map(l => l.map(esc).join(',')).join('\r\n');
 }
 function reportText(r) {
-  const out = [`${r.heading}`, `${r.title} — ${r.period}`, r.summary.map(([l, v]) => `${l}: ${usd(v)}`).join(' | '), ''];
+  const out = [`${r.heading}`, `${r.title} — ${r.period}`, r.summary.map(([l, v]) => `${l}: ${cell(v)}`).join(' | '), ''];
   r.rows.forEach(x => out.push('• ' + x.map(cell).filter(c => c !== '').join(' · ')));
   return out.join('\n');
 }
@@ -437,7 +562,8 @@ function tabConta(w, p) {
   for (const e of list) {
     card.append(h('div', { class: 'item', role: 'button', tabindex: '0', onclick: () => editEntry(p, e), onkeydown: ev => { if (ev.key === 'Enter') editEntry(p, e); } },
       h('span', { class: 'date' }, fmtDate(e.date)),
-      h('div', { class: 'grow' }, e.concept, mname(e.mid) && h('div', { class: 'mute' }, mname(e.mid))),
+      h('div', { class: 'grow' }, e.concept + (e.att ? ' 📎' : ''), mname(e.mid) && h('div', { class: 'mute' }, mname(e.mid)),
+        e.lines.length > 0 && h('div', { class: 'mute' }, `${e.lines.length} líneas`), e.notes && h('div', { class: 'mute' }, e.notes)),
       h('span', { class: 'money ' + (e.type === 'ingreso' ? 'in' : 'out') }, (e.type === 'ingreso' ? '+' : '−') + usd(e.amount))));
   }
   w.append(card,
@@ -448,15 +574,19 @@ function tabConta(w, p) {
 
 function tabReportes(w, p) {
   const R = ui.rep;
-  const kind = h('select', { 'aria-label': 'Tipo de reporte' }, [['conta', 'Registros contables'], ['miembros', 'Miembros y aportaciones'], ['grupos', 'Grupos']].map(([v, l]) => h('option', { value: v }, l)));
+  const kind = h('select', { 'aria-label': 'Tipo de reporte' }, [['conta', 'Registros contables'], ['miembros', 'Miembros y aportaciones'], ['grupos', 'Grupos'], ['participacion', 'Participación por grupos']].map(([v, l]) => h('option', { value: v }, l)));
   kind.value = R.kind;
+  const acts = [...new Set(p.entries.filter(e => e.type === 'ingreso' && e.mid).map(e => e.concept))].sort((a, b) => a.localeCompare(b, 'es'));
+  if (!acts.includes(R.act)) R.act = '';
+  const act = h('select', { 'aria-label': 'Actividad' }, [['', 'Todas las actividades'], ...acts.map(a => [a, a])].map(([v, l]) => h('option', { value: v }, l)));
+  act.value = R.act;
   const from = h('input', { type: 'date', 'aria-label': 'Desde' }), to = h('input', { type: 'date', 'aria-label': 'Hasta' });
   from.value = R.from; to.value = R.to;
-  const apply = () => { R.kind = kind.value; R.from = isDate(from.value) ? from.value : ''; R.to = isDate(to.value) ? to.value : ''; render(); };
-  [kind, from, to].forEach(x => x.addEventListener('change', apply));
-  const r = buildReport(p, R.kind, R.from, R.to);
+  const apply = () => { R.kind = kind.value; R.act = act.value; R.from = isDate(from.value) ? from.value : ''; R.to = isDate(to.value) ? to.value : ''; render(); };
+  [kind, act, from, to].forEach(x => x.addEventListener('change', apply));
+  const r = buildReport(p, R.kind, R.from, R.to, R.act);
   w.append(
-    h('div', { class: 'card noprint' }, h('div', { class: 'filters' }, kind, h('div', null, h('label', null, 'Desde'), from), h('div', null, h('label', null, 'Hasta'), to))),
+    h('div', { class: 'card noprint' }, h('div', { class: 'filters' }, kind, R.kind === 'participacion' && act, h('div', null, h('label', null, 'Desde'), from), h('div', null, h('label', null, 'Hasta'), to))),
     h('div', { class: 'card' }, reportNode(r)),
     h('div', { class: 'row noprint' },
       h('button', { class: 'btn primary', onclick: () => window.print() }, 'Imprimir / PDF'),
