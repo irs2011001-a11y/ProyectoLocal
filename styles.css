@@ -105,3 +105,5 @@ tfoot td{font-weight:700;border-top:2px solid var(--ink)}
 
 .lines{display:grid;gap:6px;margin-bottom:6px}
 .line{display:grid;grid-template-columns:1fr 96px auto;gap:6px;align-items:center}
+.chk{display:flex;align-items:center;gap:8px;margin:4px 0;font-weight:400}
+.chk input{width:auto;min-height:0;margin:0}

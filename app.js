@@ -25,6 +25,9 @@ function icon(name) {
   }
   return svg;
 }
+const CATS = ['Reparación de calles', 'Ornamentación', 'Limpieza', 'Seguridad', 'Evento', 'Otro'];
+const catList = () => [...new Set([...CATS, ...db.identities.flatMap(i => i.projects).map(x => x.cat).filter(Boolean)])];
+const STATES = [['pendiente', 'Pendiente'], ['curso', 'En curso'], ['hecha', 'Hecha']];
 const subList = () => [...new Set([...SUBS, ...db.identities.flatMap(i => i.projects).map(x => x.sub).filter(Boolean)])];
 
 /* ---------- utilidades ---------- */
@@ -104,8 +107,11 @@ function sanitize(d) {
       gid: gids.has(m.gid) ? m.gid : '', active: m.active !== false
     }));
     const mids = new Set(members.map(m => m.id));
+    const ca = o => ({ gids: arr(o && o.gids).filter(x => gids.has(x)), pids: arr(o && o.pids).filter(x => mids.has(x)) });
     const projects = arr(i.projects).map(p => ({
-      id: id(p.id), name: s(p.name, 80) || 'Sin nombre', sub: s(p.sub, 60), desc: s(p.desc, 2000),
+      id: id(p.id), name: s(p.name, 80) || 'Sin nombre', sub: s(p.sub, 60), desc: s(p.desc, 2000), cat: s(p.cat, 60),
+      assign: ca(p.assign),
+      tasks: arr(p.tasks).slice(0, 200).map(k => ({ id: id(k && k.id), name: s(k && k.name, 120) || 'Tarea', state: STATES.some(x => x[0] === (k && k.state)) ? k.state : 'pendiente', budget: cents(k && k.budget), ...ca(k) })),
       entries: arr(p.entries).map(e => ({
         id: id(e.id), date: isDate(e.date) ? e.date : today(), type: e.type === 'gasto' ? 'gasto' : 'ingreso',
         concept: s(e.concept, 120), amount: cents(e.amount), mid: mids.has(e.mid) ? e.mid : '',
@@ -192,6 +198,14 @@ function linesWidget(init, inputs) {
   };
   return { node, get, sync };
 }
+function checksWidget(f, init) {
+  const sel = new Set(init || []);
+  const boxes = f.options.map(o => {
+    const cb = h('input', { type: 'checkbox', value: o.v }); cb.checked = sel.has(o.v);
+    return h('label', { class: 'chk' }, cb, o.l);
+  });
+  return { node: h('div', null, boxes.length ? boxes : h('span', { class: 'mute' }, 'Sin opciones disponibles')), get: () => ({ val: boxes.map(l => l.firstChild).filter(c => c.checked).map(c => c.value) }) };
+}
 function fileWidget(init, err) {
   let cur = init || null;
   const info = h('div', { class: 'row' });
@@ -245,8 +259,8 @@ function openForm({ title, fields, values = {}, submit = 'Guardar', onSave, onDe
   const form = h('form', { novalidate: true }, h('h2', null, title));
   for (const f of fields) {
     let inp;
-    if (f.type === 'lines' || f.type === 'file') {
-      inputs[f.k] = f.type === 'lines' ? linesWidget(values[f.k], inputs) : fileWidget(values[f.k], err);
+    if (f.type === 'lines' || f.type === 'file' || f.type === 'checks') {
+      inputs[f.k] = f.type === 'lines' ? linesWidget(values[f.k], inputs) : f.type === 'file' ? fileWidget(values[f.k], err) : checksWidget(f, values[f.k]);
       form.append(h('label', null, f.label), inputs[f.k].node);
       continue;
     }
@@ -263,7 +277,7 @@ function openForm({ title, fields, values = {}, submit = 'Guardar', onSave, onDe
     inp.id = id;
     form.append(h('label', { for: id }, f.label + (f.req ? ' *' : '')), inp);
     if (f.custom) { // opción "crear nueva": muestra un campo de texto
-      const inp2 = h('input', { type: 'text', maxlength: 40, hidden: true, placeholder: 'Nombre de la nueva subcategoría', 'aria-label': 'Nueva subcategoría', autocomplete: 'off' });
+      const inp2 = h('input', { type: 'text', maxlength: 40, hidden: true, placeholder: 'Nombre de la nueva opción', 'aria-label': 'Nueva opción', autocomplete: 'off' });
       inputs[f.k + '_new'] = inp2;
       inp.addEventListener('change', () => { inp2.hidden = inp.value !== '__new__'; if (!inp2.hidden) inp2.focus(); });
       form.append(inp2);
@@ -279,7 +293,7 @@ function openForm({ title, fields, values = {}, submit = 'Guardar', onSave, onDe
     ev.preventDefault();
     const data = {};
     for (const f of fields) {
-      if (f.type === 'lines' || f.type === 'file') {
+      if (f.type === 'lines' || f.type === 'file' || f.type === 'checks') {
         const r = inputs[f.k].get();
         if (r.err) return void (err.textContent = r.err);
         data[f.k] = r.val; continue;
@@ -287,10 +301,11 @@ function openForm({ title, fields, values = {}, submit = 'Guardar', onSave, onDe
       let v = inputs[f.k].value.trim();
       if (f.custom && v === '__new__') {
         v = inputs[f.k + '_new'].value.trim().replace(/\s+/g, ' ');
-        if (!v) return void (err.textContent = 'Escriba el nombre de la nueva subcategoría');
+        if (!v) return void (err.textContent = 'Escriba el nombre de la nueva opción');
       }
       if (f.req && !v) return void (err.textContent = `Falta: ${f.label}`);
       if (f.type === 'money') {
+        if (!f.req && v === '') { data[f.k] = 0; continue; }
         const c = toCents(v);
         if (c == null || (f.req && c <= 0)) return void (err.textContent = `${f.label}: monto inválido (ej. 25.50)`);
         v = c;
@@ -315,17 +330,21 @@ function editProject(p) {
     title: isNew ? 'Nuevo proyecto' : 'Editar proyecto',
     fields: [
       { k: 'name', label: 'Nombre del proyecto', type: 'text', req: true, max: 80 },
+      { k: 'cat', label: 'Tipo de actividad', type: 'select', custom: true, options: [{ v: '', l: '— Sin definir —' }, ...catList().map(s => ({ v: s, l: s })), { v: '__new__', l: '＋ Crear nuevo tipo…' }] },
       { k: 'sub', label: 'Subcategoría', type: 'select', custom: true, options: [...subList().map(s => ({ v: s, l: s })), { v: '__new__', l: '＋ Crear nueva subcategoría…' }] },
       { k: 'desc', label: 'Descripción', type: 'textarea', max: 2000 }
     ],
     values: p || {},
     onSave: d => {
-      if (isNew) { const I = ident(), n = linkProject({ id: uid(), entries: [], ...d }, I); I.projects.push(n); ui.pid = n.id; ui.tab = 'resumen'; }
+      if (isNew) { const I = ident(), n = linkProject({ id: uid(), entries: [], tasks: [], assign: { gids: [], pids: [] }, ...d }, I); I.projects.push(n); ui.pid = n.id; ui.tab = 'resumen'; }
       else Object.assign(p, d);
       save(); render();
     },
     onDelete: isNew ? null : () => { ident().projects = ident().projects.filter(x => x !== p); ui.pid = null; save(); render(); toast('Proyecto eliminado'); }
   });
+}
+function unassign(I, kind, id) { // quita un grupo/persona de las asignaciones de proyectos y tareas
+  for (const q of I.projects) for (const o of [q.assign, ...q.tasks]) o[kind] = o[kind].filter(x => x !== id);
 }
 function editMember(p, m) {
   const isNew = !m;
@@ -339,7 +358,7 @@ function editMember(p, m) {
     ],
     values: m || {},
     onSave: d => { if (isNew) p.idn.members.push({ id: uid(), active: true, ...d }); else Object.assign(m, d); save(); render(); },
-    onDelete: isNew ? null : () => { p.idn.members = p.idn.members.filter(x => x !== m); p.idn.projects.forEach(q => q.entries.forEach(e => { if (e.mid === m.id) e.mid = ''; })); save(); render(); }
+    onDelete: isNew ? null : () => { unassign(p.idn, 'pids', m.id); p.idn.members = p.idn.members.filter(x => x !== m); p.idn.projects.forEach(q => q.entries.forEach(e => { if (e.mid === m.id) e.mid = ''; })); save(); render(); }
   });
 }
 function editGroup(p, g) {
@@ -352,7 +371,7 @@ function editGroup(p, g) {
     ],
     values: g || {},
     onSave: d => { if (isNew) p.idn.groups.push({ id: uid(), ...d }); else Object.assign(g, d); save(); render(); },
-    onDelete: isNew ? null : () => { p.idn.groups = p.idn.groups.filter(x => x !== g); p.idn.members.forEach(m => { if (m.gid === g.id) m.gid = ''; }); save(); render(); }
+    onDelete: isNew ? null : () => { unassign(p.idn, 'gids', g.id); p.idn.groups = p.idn.groups.filter(x => x !== g); p.idn.members.forEach(m => { if (m.gid === g.id) m.gid = ''; }); save(); render(); }
   });
 }
 function editEntry(p, e, type, mid) {
@@ -545,7 +564,7 @@ function migrateMember(p, m) {
     onSave: d => {
       const to = db.identities.find(i => i.id === d.to); if (!to) return;
       to.members.push({ id: uid(), name: m.name, phone: m.phone, notes: m.notes, gid: '', active: true });
-      m.active = false; // queda archivado aquí: su historial de aportaciones no viaja
+      m.active = false; unassign(p.idn, 'pids', m.id); // queda archivado aquí: su historial de aportaciones no viaja
       save(); render(); toast(m.name + ' migrado a ' + to.name);
     }
   });
@@ -580,11 +599,57 @@ function dock() {
     h('button', { 'aria-label': l, title: l, 'aria-current': ui.tab === k ? 'page' : null, onclick: () => { ui.tab = k; render(); } }, icon(k), h('span', { class: 'label' }, l))));
 }
 
+const STATE_L = Object.fromEntries(STATES);
+function names(p, o) {
+  const g = o.gids.map(id => (p.idn.groups.find(x => x.id === id) || {}).name);
+  const m = o.pids.map(id => (p.idn.members.find(x => x.id === id && x.active !== false) || {}).name);
+  return [...g, ...m].filter(Boolean);
+}
+const assignFields = p => [
+  { k: 'gids', label: 'Grupos', type: 'checks', options: p.idn.groups.map(g => ({ v: g.id, l: g.name })) },
+  { k: 'pids', label: 'Personas', type: 'checks', options: p.members.map(m => ({ v: m.id, l: m.name })) }
+];
+function editAssign(p) {
+  openForm({ title: 'Asignar al proyecto', fields: assignFields(p), values: p.assign, onSave: d => { p.assign = { gids: d.gids, pids: d.pids }; save(); render(); } });
+}
+function editTask(p, k) {
+  const isNew = !k;
+  openForm({
+    title: isNew ? 'Nueva tarea' : 'Editar tarea',
+    fields: [
+      { k: 'name', label: 'Tarea / subproyecto', type: 'text', req: true, max: 120 },
+      { k: 'state', label: 'Estado', type: 'select', options: STATES.map(([v, l]) => ({ v, l })) },
+      { k: 'budget', label: 'Presupuesto (USD, opcional)', type: 'money', ph: '0.00' },
+      ...assignFields(p)
+    ],
+    values: k || { state: 'pendiente', budget: 0 },
+    onSave: d => { if (isNew) p.tasks.push({ id: uid(), ...d }); else Object.assign(k, d); save(); render(); },
+    onDelete: isNew ? null : () => { p.tasks = p.tasks.filter(x => x !== k); save(); render(); }
+  });
+}
+function resumenAsignados(p) {
+  if (p.virtual) return null;
+  const n = names(p, p.assign);
+  return h('div', { class: 'card' },
+    h('div', { class: 'row between' }, h('h2', null, 'Asignados al proyecto'), h('button', { class: 'btn sm', onclick: () => editAssign(p) }, 'Editar')),
+    h('div', { class: 'row' }, n.length ? n.map(x => h('span', { class: 'tag' }, x)) : h('span', { class: 'mute' }, 'Sin grupos ni personas asignadas')));
+}
+function resumenTareas(p) {
+  if (p.virtual) return null;
+  return h('div', { class: 'card' },
+    h('div', { class: 'row between' }, h('h2', null, 'Tareas'), h('button', { class: 'btn sm primary', onclick: () => editTask(p) }, '+ Tarea')),
+    p.tasks.length ? p.tasks.map(k => {
+      const n = names(p, k);
+      return h('div', { class: 'item', role: 'button', tabindex: '0', onclick: () => editTask(p, k), onkeydown: ev => { if (ev.key === 'Enter') editTask(p, k); } },
+        h('div', { class: 'grow' }, h('b', null, k.name), h('div', { class: 'mute' }, n.join(', ') || 'Sin responsables')),
+        h('span', { class: 'tag' }, STATE_L[k.state]), k.budget > 0 && h('span', { class: 'mute' }, usd(k.budget)));
+    }) : h('div', { class: 'mute' }, 'Sin tareas. Agregue la primera.'));
+}
 function tabResumen(w, p) {
   const t = totals(p.entries);
   w.append(h('div', { class: 'card' },
     h('div', { class: 'row between' }, h('h2', null, p.name), h('button', { class: 'btn sm', onclick: () => editProject(p) }, 'Editar')),
-    p.sub && h('span', { class: 'tag' }, p.sub),
+    h('div', { class: 'row' }, p.cat && h('span', { class: 'tag' }, p.cat), p.sub && h('span', { class: 'tag' }, p.sub)),
     h('p', null, p.desc || h('span', { class: 'mute' }, 'Sin descripción')),
     h('div', { class: 'stats' },
       h('div', { class: 'stat' }, h('span', { class: 'mute' }, 'Ingresos'), h('b', { class: 'in' }, usd(t.i))),
@@ -593,7 +658,8 @@ function tabResumen(w, p) {
     h('p', { class: 'mute' }, `${p.members.length} miembros · ${p.groups.length} grupos · ${p.entries.length} registros`)),
     h('div', { class: 'row' },
       h('button', { class: 'btn primary', onclick: () => editEntry(p, null, 'ingreso') }, '+ Ingreso'),
-      h('button', { class: 'btn', onclick: () => editEntry(p, null, 'gasto') }, '+ Gasto')));
+      h('button', { class: 'btn', onclick: () => editEntry(p, null, 'gasto') }, '+ Gasto')),
+    resumenAsignados(p), resumenTareas(p));
 }
 
 function tabMiembros(w, p) {
