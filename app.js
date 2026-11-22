@@ -356,8 +356,8 @@ function editProject(p) {
       { k: 'name', label: 'Nombre del proyecto', type: 'text', req: true, max: 80 },
       { k: 'cat', label: 'Tipo de actividad', type: 'select', custom: true, options: [{ v: '', l: '— Sin definir —' }, ...catList().map(s => ({ v: s, l: s })), { v: '__new__', l: '＋ Crear nuevo tipo…' }] },
       { k: 'sub', label: 'Subcategoría', type: 'select', custom: true, options: [...subList().map(s => ({ v: s, l: s })), { v: '__new__', l: '＋ Crear nueva subcategoría…' }] },
-      { k: 'start', label: 'Fecha de inicio (opcional)', type: 'date' },
-      { k: 'end', label: 'Fecha de cierre (opcional)', type: 'date' },
+      { k: 'start', label: 'Fecha del proyecto', type: 'date' },
+      { k: 'end', label: 'Fecha de cierre (opcional, solo si dura varios días)', type: 'date' },
       { k: 'quota', label: 'Cuota por persona asignada (USD, opcional)', type: 'money', ph: '0.00' },
       { k: 'desc', label: 'Descripción', type: 'textarea', max: 2000 }
     ],
@@ -713,7 +713,7 @@ function tabProyectos(w, I) {
     const t = totals(p.entries);
     w.append(h('div', { class: 'card', role: 'button', tabindex: '0', onclick: () => { ui.pid = p.id; ui.tab = 'resumen'; render(); }, onkeydown: e => { if (e.key === 'Enter') { ui.pid = p.id; ui.tab = 'resumen'; render(); } } },
       h('div', { class: 'row between' }, h('h2', { class: 'grow' }, p.name), h('span', { class: 'money ' + (t.b < 0 ? 'out' : 'in') }, usd(t.b))),
-      h('div', { class: 'row' }, p.sub && h('span', { class: 'tag' }, p.sub), h('span', { class: 'mute' }, `${p.members.length} miembros · ${p.groups.length} grupos`))));
+      h('div', { class: 'row' }, p.sub && h('span', { class: 'tag' }, p.sub), (p.start || p.end) && h('span', { class: 'tag' }, fmtDate(p.start) + (p.end && p.end !== p.start ? (p.start ? ' – ' : '') + fmtDate(p.end) : '')), h('span', { class: 'mute' }, `${p.members.length} miembros · ${p.groups.length} grupos`))));
   }
   w.append(h('button', { class: 'btn primary fab', onclick: () => editProject() }, '+ Nuevo proyecto'));
 }
@@ -774,7 +774,7 @@ function tabResumen(w, p) {
   w.append(h('div', { class: 'card' },
     h('div', { class: 'row between' }, h('h2', null, p.name), h('button', { class: 'btn sm', onclick: () => editProject(p) }, 'Editar')),
     h('div', { class: 'row' }, p.cat && h('span', { class: 'tag' }, p.cat), p.sub && h('span', { class: 'tag' }, p.sub)),
-    (p.start || p.end || p.quota > 0) && h('p', { class: 'mute' }, [(p.start || p.end) && `Período: ${fmtDate(p.start) || '…'} – ${fmtDate(p.end) || '…'}`, p.quota > 0 && `Cuota: ${usd(p.quota)} por persona`].filter(Boolean).join(' · ')),
+    (p.start || p.end || p.quota > 0) && h('p', { class: 'mute' }, [(p.start || p.end) && `${p.start && p.end && p.end !== p.start ? 'Período' : 'Fecha'}: ${fmtDate(p.start) || '…'}${p.start && p.end && p.end !== p.start ? ' – ' + fmtDate(p.end) : (!p.start ? ' (cierre ' + fmtDate(p.end) + ')' : '')}`, p.quota > 0 && `Cuota: ${usd(p.quota)} por persona`].filter(Boolean).join(' · ')),
     h('p', null, p.desc || h('span', { class: 'mute' }, 'Sin descripción')),
     h('div', { class: 'stats' },
       h('div', { class: 'stat' }, h('span', { class: 'mute' }, 'Ingresos'), h('b', { class: 'in' }, usd(t.i))),
