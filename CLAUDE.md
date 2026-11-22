@@ -22,6 +22,7 @@
 - project `{id,name,sub,desc,cat,start,end,quota,assign:{gids,pids},tasks:[{id,name,state,budget,gids,pids}],entries[]}` (fechas YYYY-MM-DD opcionales; quota en centavos por persona asignada)
 - member `{id,name,phone,notes,gid,active}`; group `{id,name,desc}`
 - entry `{id,date,type,kind:'dinero'|'especie'|'trabajo',concept,cid,amount,mid,tid,notes,lines[{d,a,tid}],att}`; solo `kind=dinero` entra a caja (`isCash`/`totals`)
+- entry.qa = parte (centavos) del aporte en dinero aplicada a cuota; reporte cuotas suma `qa` (`quotaPaid`), pagos parciales ok; `applyPastToQuota` convierte aportes antiguos
 - identity.concepts `[{id,name,type}]`: lista guardada (desplegable + "Crear nuevo"), editable en Contabilidad → Conceptos; renombrar propaga a `entry.concept`
 - Navegación: `ui.iid` (identidad) → `ui.pid` (proyecto) → `ui.tab`. Inicio = lista de identidades. Identidad sin proyectos usa `identityView()` (solo Miembros/Grupos/Reportes).
 

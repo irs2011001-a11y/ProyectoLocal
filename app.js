@@ -119,6 +119,7 @@ function sanitize(d) {
           id: id(e.id), date: isDate(e.date) ? e.date : today(), type: e.type === 'gasto' ? 'gasto' : 'ingreso',
           kind: e.type !== 'gasto' && (e.kind === 'especie' || e.kind === 'trabajo') ? e.kind : 'dinero',
           concept: s(e.concept, 120), cid: s(e.cid, 64), amount: cents(e.amount), mid: mids.has(e.mid) ? e.mid : '',
+          qa: e.type !== 'gasto' && mids.has(e.mid) && e.kind !== 'especie' && e.kind !== 'trabajo' ? Math.min(cents(e.qa), cents(e.amount)) : 0, // parte aplicada a cuota
           tid: tids.has(e.tid) ? e.tid : '', notes: s(e.notes, 1000),
           lines: arr(e.lines).slice(0, 100).map(l => ({ d: s(l && l.d, 120), a: cents(l && l.a), tid: tids.has(l && l.tid) ? l.tid : '' })),
           att: cleanAtt(e.att)
@@ -177,8 +178,9 @@ const totals = (entries) => {
   return { i, g, b: i - g };
 };
 const memberTotal = (p, mid, from, to) => sum(inRange(p.entries, from, to).filter(e => e.mid === mid && e.type === 'ingreso' && isCash(e)).map(e => e.amount));
+const quotaPaid = (p, mid, from, to) => sum(inRange(p.entries, from, to).filter(e => e.mid === mid && e.type === 'ingreso' && isCash(e)).map(e => e.qa || 0));
+const owes = p => (p.quota ? p.members.filter(m => p.assign.pids.includes(m.id) || p.assign.gids.includes(m.gid)) : []);
 const inRange = (list, from, to) => list.filter(e => (!from || e.date >= from) && (!to || e.date <= to));
-
 /* ---------- widgets de formulario: líneas de gasto y comprobante ---------- */
 function linesWidget(init, inputs, tasks) {
   const box = h('div', { class: 'lines' });
@@ -417,7 +419,9 @@ function editEntry(p, e, type, mid) {
   ];
   if (type === 'ingreso') fields.push(
     { k: 'kind', label: 'Tipo de aporte', type: 'select', options: [{ v: 'dinero', l: 'Dinero' }, { v: 'especie', l: 'En especie (materiales)' }, { v: 'trabajo', l: 'Trabajo / mano de obra' }] },
-    { k: 'mid', label: 'Miembro (aportación)', type: 'select', options: [{ v: '', l: '— Ninguno —' }, ...p.members.map(m => ({ v: m.id, l: m.name }))] });
+    { k: 'mid', label: 'Miembro (aportación)', type: 'select', options: [{ v: '', l: '— Ninguno —' }, ...p.members.map(m => ({ v: m.id, l: m.name }))] },
+    { k: 'qmode', label: 'Pago de cuota (solo si hay miembro y el aporte es en dinero)', type: 'select', options: [{ v: 'no', l: 'No es pago de cuota' }, { v: 'todo', l: 'Todo el monto es pago de cuota' }, { v: 'parte', l: 'Solo una parte es cuota (otra parte es aporte aparte)' }] },
+    { k: 'qa', label: 'Parte aplicada a cuota (USD; solo si eligió "una parte")', type: 'money', ph: '0.00' });
   if (taskOpts.length) fields.push({ k: 'tid', label: 'Actividad (tarea del proyecto)', type: 'select', options: [{ v: '', l: '— Sin tarea (general) —' }, ...taskOpts] });
   if (type === 'gasto') fields.push({ k: 'lines', label: 'Desglose de la factura (opcional: si agrega líneas, el monto es la suma)', type: 'lines', tasks: taskOpts });
   fields.push({ k: 'notes', label: 'Notas', type: 'textarea', max: 1000 });
@@ -425,10 +429,13 @@ function editEntry(p, e, type, mid) {
   openForm({
     title: (isNew ? 'Nuevo ' : 'Editar ') + type,
     fields,
-    values: e || { date: today(), mid: mid || '', concept: mid ? 'Aportación' : '', kind: 'dinero', tid: '' },
-    validate: d => ((d.lines && d.lines.length) || (d.kind && d.kind !== 'dinero') || d.amount > 0 ? '' : 'Monto: debe ser mayor que 0'),
+    values: e ? { ...e, qmode: !e.qa ? 'no' : e.qa >= e.amount ? 'todo' : 'parte' } : { date: today(), mid: mid || '', concept: mid && p.quota ? 'Cuota' : mid ? 'Aportación' : '', kind: 'dinero', tid: '', qmode: mid && p.quota ? 'todo' : 'no' },
+    validate: d => ((d.lines && d.lines.length) || (d.kind && d.kind !== 'dinero') || d.amount > 0 ? '' : 'Monto: debe ser mayor que 0')
+      || (type === 'ingreso' && d.qmode !== 'no' && (!d.mid || (d.kind && d.kind !== 'dinero')) ? 'Para aplicar a cuota elija un miembro y tipo de aporte Dinero' : '')
+      || (d.qmode === 'parte' && !(d.qa > 0 && d.qa < d.amount) ? 'La parte de cuota debe ser mayor que 0 y menor que el monto' : ''),
     onSave: d => {
       d.type = type;
+      d.qa = type === 'gasto' || d.qmode === 'no' ? 0 : d.qmode === 'todo' ? d.amount : d.qa; delete d.qmode;
       if (type === 'gasto') { d.mid = ''; d.kind = 'dinero'; } else { d.lines = []; d.att = null; }
       if (d.lines.length) d.amount = sum(d.lines.map(l => l.a));
       if (d.tid === undefined) d.tid = e ? e.tid : '';
@@ -536,10 +543,10 @@ function buildReport(p, kind, from, to, act) {
     r = { title: 'Por concepto', head: ['Concepto', 'Tipo', 'Registros', 'Total'], num: [2, 3], rows, foot: ['Balance (ingresos − gastos)', '', '', t.b] };
   } else if (kind === 'cuotas') {
     const q = p.quota || 0;
-    const owe = q ? p.members.filter(m => p.assign.pids.includes(m.id) || p.assign.gids.includes(m.gid)) : [];
-    const rows = owe.map(m => { const a = memberTotal(p, m.id, from, to), pend = Math.max(0, q - a); return [m.name, gname(m.gid), q, a, pend, pend ? 'Pendiente' : 'Al día']; });
+    const owe = owes(p);
+    const rows = owe.map(m => { const a = quotaPaid(p, m.id, from, to), pend = Math.max(0, q - a); return [m.name, gname(m.gid), q, a, pend, pend ? 'Pendiente' : 'Al día']; });
     r = {
-      title: 'Cuotas pendientes' + (q ? '' : ' (defina la cuota en el proyecto y asigne personas o grupos)'), head: ['Persona', 'Grupo', 'Cuota', 'Aportado', 'Pendiente', 'Estado'], num: [2, 3, 4],
+      title: 'Cuotas pendientes' + (q ? '' : ' (defina la cuota en el proyecto y asigne personas o grupos)'), head: ['Persona', 'Grupo', 'Cuota', 'Pagado de cuota', 'Pendiente', 'Estado'], num: [2, 3, 4],
       rows, foot: ['Total', '', sum(rows.map(x => x[2])), sum(rows.map(x => x[3])), sum(rows.map(x => x[4])), '']
     };
   } else if (kind === 'participacion') {
@@ -854,6 +861,20 @@ function tabConta(w, p) {
       h('button', { class: 'btn', onclick: () => manageConcepts(p.idn) }, 'Conceptos')));
 }
 
+function applyPastToQuota(p) {
+  const plan = [];
+  for (const m of owes(p)) {
+    let pend = Math.max(0, p.quota - quotaPaid(p, m.id));
+    for (const e of p.entries.filter(x => x.mid === m.id && x.type === 'ingreso' && isCash(x) && !x.qa).sort((a, b) => a.date.localeCompare(b.date))) {
+      if (pend <= 0) break;
+      const a = Math.min(e.amount, pend); pend -= a; plan.push([e, a]);
+    }
+  }
+  if (!plan.length) return void toast('No hay aportaciones sin aplicar para cubrir cuotas pendientes');
+  if (!confirm(`Se aplicarán ${plan.length} aportación(es) a cuota por ${usd(sum(plan.map(x => x[1])))}. Puede editarlas luego una a una. ¿Continuar?`)) return;
+  for (const [e, a] of plan) e.qa = a;
+  save(); render(); toast('Aportaciones aplicadas a cuota');
+}
 function tabReportes(w, p) {
   const R = ui.rep;
   if (R.pid !== (p.id || '')) { R.pid = p.id || ''; R.from = p.start || ''; R.to = p.end || ''; } // período del proyecto por defecto
@@ -871,6 +892,9 @@ function tabReportes(w, p) {
   w.append(
     h('div', { class: 'card noprint' }, h('div', { class: 'filters' }, kind, R.kind === 'participacion' && act, h('div', null, h('label', null, 'Desde'), from), h('div', null, h('label', null, 'Hasta'), to))),
     h('div', { class: 'card' }, reportNode(r)),
+    R.kind === 'cuotas' && !p.virtual && p.quota > 0 && h('div', { class: 'row noprint' },
+      h('button', { class: 'btn primary', onclick: () => applyPastToQuota(p) }, 'Aplicar aportaciones anteriores a cuota'),
+      h('span', { class: 'mute' }, 'Convierte aportes en dinero ya registrados (sin marcar) en pago de cuota, hasta cubrir lo pendiente. Para pagos nuevos: Miembros → + Aportación.')),
     h('div', { class: 'row noprint' },
       h('button', { class: 'btn primary', onclick: () => window.print() }, 'Imprimir / PDF'),
       h('button', { class: 'btn', onclick: () => shareReport(r) }, 'Compartir'),
